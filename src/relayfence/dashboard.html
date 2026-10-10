@@ -1,0 +1,747 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>RelayFence · Coordination console</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #142e32;
+        --muted: #546a6d;
+        --line: #d7e2df;
+        --paper: #f5f7f3;
+        --green: #17614e;
+        --warn: #92510b;
+        --red: #a63535;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font:
+          15px/1.5 system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif;
+      }
+      button,
+      input {
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:disabled {
+        cursor: default;
+        opacity: 0.45;
+      }
+      a {
+        color: inherit;
+      }
+      header {
+        background: var(--ink);
+        color: #f7faf6;
+        padding: 25px max(24px, calc((100vw - 1260px) / 2));
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .brand {
+        font-size: 22px;
+        font-weight: 760;
+        letter-spacing: -0.8px;
+      }
+      .brand span {
+        color: #a9d8b6;
+      }
+      header small {
+        color: #b9cdc8;
+        letter-spacing: 0.08em;
+        font-size: 11px;
+        text-transform: uppercase;
+      }
+      main {
+        max-width: 1308px;
+        margin: auto;
+        padding: 34px 24px 64px;
+      }
+      .intro {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 18px;
+        margin-bottom: 24px;
+      }
+      h1 {
+        font-size: clamp(26px, 3vw, 40px);
+        letter-spacing: -1.4px;
+        line-height: 1.2;
+        margin: 0 0 10px;
+      }
+      h2 {
+        font-size: 18px;
+        margin: 0;
+      }
+      p {
+        margin: 0;
+        color: var(--muted);
+      }
+      .connection {
+        padding: 18px;
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        display: flex;
+        align-items: end;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      label {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 650;
+      }
+      input {
+        display: block;
+        margin-top: 6px;
+        padding: 10px 12px;
+        border: 1px solid #b9ceca;
+        border-radius: 6px;
+        color: var(--ink);
+        background: #fff;
+        width: 100%;
+        outline-offset: 3px;
+      }
+      .project {
+        width: 180px;
+      }
+      .secret {
+        flex: 1;
+        min-width: 210px;
+      }
+      button {
+        padding: 10px 17px;
+        border: 1px solid var(--green);
+        border-radius: 6px;
+        background: var(--green);
+        color: white;
+        font-weight: 600;
+      }
+      button.quiet {
+        background: transparent;
+        color: var(--green);
+        border-color: var(--line);
+      }
+      .status {
+        font-size: 12px;
+        color: var(--muted);
+        padding: 10px 0;
+        min-height: 38px;
+      }
+      .status.error {
+        color: var(--red);
+      }
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 16px;
+        margin: 12px 0 26px;
+      }
+      .stat {
+        border-top: 3px solid #83b7a0;
+        padding: 15px 18px;
+        background: #eaf0e9;
+        border-radius: 3px;
+      }
+      .stat strong {
+        font-size: 30px;
+        letter-spacing: -1px;
+        display: block;
+      }
+      .stat span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .columns {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 22px;
+        align-items: start;
+      }
+      .panel {
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        overflow: hidden;
+      }
+      .panel-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      .count {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .rows {
+        min-height: 200px;
+      }
+      .empty {
+        padding: 46px 24px;
+        text-align: center;
+        color: var(--muted);
+      }
+      .row {
+        padding: 17px 20px;
+        border-bottom: 1px solid #e7eeeb;
+      }
+      .row:last-child {
+        border-bottom: 0;
+      }
+      .row-top {
+        display: flex;
+        align-items: start;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .name {
+        font-weight: 650;
+        overflow-wrap: anywhere;
+      }
+      .meta {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 7px;
+        overflow-wrap: anywhere;
+      }
+      .pill {
+        display: inline-block;
+        white-space: nowrap;
+        border-radius: 20px;
+        padding: 3px 9px;
+        font-size: 11px;
+        font-weight: 650;
+        background: #eef2f0;
+        color: var(--muted);
+      }
+      .pill.good {
+        background: #e0f0e5;
+        color: var(--green);
+      }
+      .pill.warn {
+        background: #fff0d9;
+        color: var(--warn);
+      }
+      details {
+        margin-top: 10px;
+      }
+      summary {
+        cursor: pointer;
+        color: var(--green);
+        font-size: 12px;
+      }
+      pre {
+        font-size: 12px;
+        line-height: 1.6;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        background: #f4f7f5;
+        border-radius: 6px;
+        padding: 12px;
+        max-height: 240px;
+        overflow: auto;
+      }
+      .pager {
+        display: flex;
+        justify-content: space-between;
+        padding: 12px 20px;
+        background: #fbfcfa;
+      }
+      .pager button {
+        font-size: 12px;
+        padding: 6px 12px;
+      }
+      .timeline {
+        margin-top: 22px;
+      }
+      .event {
+        display: grid;
+        grid-template-columns: 80px 150px 1fr 105px;
+        gap: 12px;
+        padding: 13px 20px;
+        border-bottom: 1px solid #edf1ee;
+        font-size: 12px;
+      }
+      .event span {
+        overflow-wrap: anywhere;
+      }
+      .event .kind {
+        font-weight: 650;
+      }
+      .event time {
+        color: var(--muted);
+        text-align: right;
+      }
+      .event-head {
+        background: #f2f6f2;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 600;
+      }
+      .footer {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 20px;
+      }
+      .hint {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 4px;
+      }
+      .dot {
+        display: inline-block;
+        width: 7px;
+        height: 7px;
+        background: #a9d8b6;
+        border-radius: 50%;
+        margin-right: 8px;
+      }
+      @media (max-width: 780px) {
+        .columns {
+          grid-template-columns: 1fr;
+        }
+        .intro {
+          display: block;
+        }
+        .intro > p {
+          margin-top: 12px;
+        }
+        header {
+          padding: 20px 24px;
+        }
+        .stats {
+          gap: 8px;
+        }
+        .stat {
+          padding: 12px;
+        }
+        .event {
+          grid-template-columns: 42px 1fr;
+          gap: 4px 12px;
+        }
+        .event-head {
+          display: none;
+        }
+        .event time {
+          text-align: left;
+        }
+        .event > span:nth-child(3),
+        .event time {
+          grid-column: 2;
+        }
+        .event > span:first-child {
+          grid-row: 1 / span 3;
+        }
+        .project,
+        .secret {
+          width: 100%;
+          flex: auto;
+        }
+        .connection button {
+          flex: 1;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="brand">Relay<span>Fence</span></div>
+      <small><span class="dot"></span>Shared coordination ledger</small>
+    </header>
+    <main>
+      <div class="intro">
+        <div>
+          <h1>One shared view of the work.</h1>
+          <p>
+            See who owns each task and which results still match their inputs.
+          </p>
+        </div>
+        <p class="hint">Read-only console · refreshes every 5 seconds</p>
+      </div>
+      <form class="connection" id="connect-form">
+        <label class="project"
+          >Project<input
+            id="project"
+            value="default"
+            required
+            maxlength="128"
+            autocomplete="off"
+        /></label>
+        <label class="secret"
+          >Access token<input
+            id="token"
+            type="password"
+            placeholder="From your access.token file"
+            required
+            autocomplete="off"
+        /></label>
+        <button id="connect" type="submit">Connect</button
+        ><button id="refresh" type="button" class="quiet" disabled>
+          Refresh
+        </button>
+      </form>
+      <div id="status" class="status" role="status" aria-live="polite">
+        Connect to view your project. The token stays in this tab's memory.
+      </div>
+      <div class="stats">
+        <div class="stat">
+          <strong id="live-count">—</strong
+          ><span>Active leases on this page</span>
+        </div>
+        <div class="stat">
+          <strong id="ready-count">—</strong
+          ><span>Available tasks on this page</span>
+        </div>
+        <div class="stat">
+          <strong id="stale-count">—</strong
+          ><span>Stale artifacts on this page</span>
+        </div>
+      </div>
+      <div class="columns">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Tasks</h2>
+            <span class="count" id="task-count">Awaiting connection</span>
+          </div>
+          <div id="tasks" class="rows">
+            <div class="empty">
+              Task ownership and lease deadlines appear here.
+            </div>
+          </div>
+          <div class="pager">
+            <button id="tasks-first" class="quiet" disabled>First page</button
+            ><button id="tasks-next" class="quiet" disabled>Next page →</button>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <h2>State &amp; artifacts</h2>
+            <span class="count" id="item-count">Awaiting connection</span>
+          </div>
+          <div id="items" class="rows">
+            <div class="empty">
+              Versioned inputs and published results appear here.
+            </div>
+          </div>
+          <div class="pager">
+            <button id="items-first" class="quiet" disabled>First page</button
+            ><button id="items-next" class="quiet" disabled>Next page →</button>
+          </div>
+        </section>
+      </div>
+      <section class="panel timeline">
+        <div class="panel-head">
+          <h2>Activity</h2>
+          <span id="event-count" class="count"
+            >Committed events · latest 50 loaded</span
+          >
+        </div>
+        <div class="event event-head">
+          <span>Cursor</span><span>Event</span><span>Subject · actor</span
+          ><span>Time</span>
+        </div>
+        <div id="events"><div class="empty">No events loaded.</div></div>
+      </section>
+      <p class="footer">
+        Freshness covers explicitly declared dependencies. Lease ownership
+        applies to submissions through RelayFence. Agent software and direct
+        file edits remain under your control.
+      </p>
+    </main>
+    <script>
+      const el = (id) => document.getElementById(id);
+      let token = "",
+        project = "",
+        busy = false,
+        eventCursor = 0,
+        events = [],
+        taskCursor = "",
+        itemCursor = "",
+        taskNext = null,
+        itemNext = null,
+        generation = 0;
+      const node = (tag, cls, text) => {
+        const n = document.createElement(tag);
+        n.className = cls || "";
+        if (text !== undefined) n.textContent = text;
+        return n;
+      };
+      function status(message, error = false) {
+        el("status").textContent = message;
+        el("status").className = "status" + (error ? " error" : "");
+      }
+      async function call(operation, extra = {}) {
+        const response = await fetch("/v1/" + operation, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer " + token,
+          },
+          body: JSON.stringify({ project, ...extra }),
+          cache: "no-store",
+        });
+        const result = await response.json();
+        if (!result.ok)
+          throw new Error(result.error.code + ": " + result.error.message);
+        return result.data;
+      }
+      function empty(target, text) {
+        el(target).replaceChildren(node("div", "empty", text));
+      }
+      function renderTasks(data) {
+        const target = el("tasks");
+        target.replaceChildren();
+        for (const task of data.tasks) {
+          const row = node("div", "row"),
+            top = node("div", "row-top");
+          top.append(node("div", "name", task.title));
+          const label = task.lease_expired
+            ? "lease expired"
+            : task.status === "done" &&
+                task.result_freshness &&
+                !task.result_freshness.fresh
+              ? "done · stale"
+              : task.status;
+          top.append(
+            node(
+              "span",
+              "pill " +
+                (label.includes("stale") || task.lease_expired
+                  ? "warn"
+                  : task.status === "running" || task.status === "done"
+                    ? "good"
+                    : ""),
+              label,
+            ),
+          );
+          row.append(
+            top,
+            node(
+              "div",
+              "meta",
+              task.task_id +
+                " · revision " +
+                task.revision +
+                " · fence " +
+                task.fence,
+            ),
+          );
+          if (task.owner)
+            row.append(
+              node(
+                "div",
+                "meta",
+                "Owner: " +
+                  task.owner +
+                  (task.expires_at
+                    ? " · expires " +
+                      new Date(task.expires_at * 1000).toLocaleTimeString()
+                    : ""),
+              ),
+            );
+          if (task.inputs.length)
+            row.append(
+              node("div", "meta", "Inputs: " + task.inputs.join(", ")),
+            );
+          target.append(row);
+        }
+        if (!data.tasks.length)
+          empty(
+            "tasks",
+            "No tasks on this page. Create one from an agent or the API.",
+          );
+        el("task-count").textContent = data.tasks.length + " on this page";
+        el("live-count").textContent = data.tasks.filter(
+          (t) => t.status === "running" && !t.lease_expired,
+        ).length;
+        el("ready-count").textContent = data.tasks.filter(
+          (t) => t.status === "ready" || t.lease_expired,
+        ).length;
+        taskNext = data.next_cursor;
+        el("tasks-next").disabled = !taskNext;
+        el("tasks-first").disabled = !taskCursor;
+      }
+      function renderItems(data) {
+        const target = el("items");
+        target.replaceChildren();
+        for (const item of data.items) {
+          const row = node("div", "row"),
+            top = node("div", "row-top");
+          top.append(
+            node("div", "name", item.key),
+            node(
+              "span",
+              "pill " + (item.fresh ? "good" : "warn"),
+              item.fresh ? "current" : "stale",
+            ),
+          );
+          row.append(
+            top,
+            node(
+              "div",
+              "meta",
+              item.kind + " · version " + item.version + " · by " + item.actor,
+            ),
+          );
+          if (item.dependencies.length)
+            row.append(
+              node(
+                "div",
+                "meta",
+                "Depends on: " +
+                  item.dependencies
+                    .map((d) => d.key + "@" + d.version)
+                    .join(", "),
+              ),
+            );
+          if (!item.fresh)
+            row.append(
+              node(
+                "div",
+                "meta",
+                "Changed: " +
+                  item.stale_dependencies
+                    .map(
+                      (d) =>
+                        d.key +
+                        " @" +
+                        d.expected_version +
+                        " → @" +
+                        d.current_version,
+                    )
+                    .join(", "),
+              ),
+            );
+          const details = node("details");
+          details.append(
+            node("summary", "", "View content"),
+            node("pre", "", JSON.stringify(item.value, null, 2)),
+          );
+          row.append(details);
+          target.append(row);
+        }
+        if (!data.items.length)
+          empty("items", "No shared state or artifacts on this page.");
+        el("item-count").textContent = data.items.length + " on this page";
+        el("stale-count").textContent = data.items.filter(
+          (i) => i.kind === "artifact" && !i.fresh,
+        ).length;
+        itemNext = data.next_cursor;
+        el("items-next").disabled = !itemNext;
+        el("items-first").disabled = !itemCursor;
+      }
+      function renderEvents() {
+        el("events").replaceChildren();
+        for (const event of events.slice(-50).reverse()) {
+          const row = node("div", "event");
+          row.append(
+            node("span", "", String(event.seq)),
+            node("span", "kind", event.kind),
+            node("span", "", event.subject + " · " + event.actor),
+            node(
+              "time",
+              "",
+              new Date(event.created_at * 1000).toLocaleTimeString(),
+            ),
+          );
+          el("events").append(row);
+        }
+        if (!events.length)
+          empty("events", "No committed events in this project.");
+        el("event-count").textContent =
+          "Cursor " + eventCursor + " · latest 50 loaded";
+      }
+      async function refresh() {
+        if (!token || busy) return;
+        busy = true;
+        const current = generation;
+        try {
+          const [tasks, items, activity] = await Promise.all([
+            call("tasks_list", { after: taskCursor, limit: 50 }),
+            call("items_list", { after: itemCursor, limit: 50 }),
+            call("events_list", { after: eventCursor, limit: 200 }),
+          ]);
+          if (current !== generation) return;
+          renderTasks(tasks);
+          renderItems(items);
+          eventCursor = activity.next_cursor;
+          events = events.concat(activity.events).slice(-50);
+          renderEvents();
+          status(
+            "Connected to " +
+              project +
+              " · Updated " +
+              new Date().toLocaleTimeString() +
+              (activity.has_more
+                ? " · Loading more activity on the next refresh."
+                : ""),
+          );
+        } catch (error) {
+          if (current === generation)
+            status(
+              "Refresh failed; displayed data may be old. " + error.message,
+              true,
+            );
+        } finally {
+          busy = false;
+        }
+      }
+      el("connect-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (busy) return;
+        token = el("token").value.trim() || token;
+        project = el("project").value.trim();
+        el("token").value = "";
+        el("token").required = false;
+        generation++;
+        eventCursor = 0;
+        events = [];
+        taskCursor = "";
+        itemCursor = "";
+        empty("tasks", "Loading project tasks…");
+        empty("items", "Loading project state…");
+        empty("events", "Loading project activity…");
+        for (const id of ["live-count", "ready-count", "stale-count"])
+          el(id).textContent = "—";
+        el("refresh").disabled = false;
+        status("Connecting…");
+        await refresh();
+      });
+      el("refresh").addEventListener("click", refresh);
+      for (const kind of ["tasks", "items"]) {
+        el(kind + "-next").addEventListener("click", () => {
+          if (busy) return;
+          if (kind === "tasks") taskCursor = taskNext;
+          else itemCursor = itemNext;
+          refresh();
+        });
+        el(kind + "-first").addEventListener("click", () => {
+          if (busy) return;
+          if (kind === "tasks") taskCursor = "";
+          else itemCursor = "";
+          refresh();
+        });
+      }
+      setInterval(refresh, 5000);
+    </script>
+  </body>
+</html>

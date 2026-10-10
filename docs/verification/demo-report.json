@@ -1,0 +1,37 @@
+{
+  "checks": [
+    {
+      "check": "exclusive-claim",
+      "status": "PASS",
+      "detail": "Two independent MCP clients raced; exactly one received a lease."
+    },
+    {
+      "check": "stale-input",
+      "status": "PASS",
+      "detail": "Publishing against api/spec@1 was rejected after the contract changed to @2."
+    },
+    {
+      "check": "idempotent-retry",
+      "status": "PASS",
+      "detail": "Repeating a successful completion returned its saved receipt; artifact stayed at version 1."
+    },
+    {
+      "check": "artifact-freshness",
+      "status": "PASS",
+      "detail": "The published login artifact became stale after its dependency changed again."
+    },
+    {
+      "check": "fenced-takeover",
+      "status": "PASS",
+      "detail": "A replacement took fence 2; the old fence 1 worker could no longer publish."
+    },
+    {
+      "check": "crash-recovery",
+      "status": "PASS",
+      "detail": "After forcibly terminating and restarting the service, receipts, versions and events survived."
+    }
+  ],
+  "events": 12,
+  "vendor_clients_tested": [],
+  "note": "Protocol clients are not live Codex, ZCode or DSH sessions."
+}

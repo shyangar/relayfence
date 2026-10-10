@@ -1,0 +1,23 @@
+name: Coordination bug
+description: Report a reproducible ownership, version, recovery or integration failure.
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include operation order, sanitized payloads, error codes and any race/restart steps. Never include tokens or real ledger files.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Versions and environment
+      description: RelayFence, Python, OS, client software, transport and storage type.
+    validations:
+      required: true
