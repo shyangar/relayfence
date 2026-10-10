@@ -3,14 +3,17 @@
 import os
 import signal
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .client import RelayFenceClient
 from .errors import CoordinationError
+from .locking import local_lock
 from .models import ModelId, Name, Output
 from .store import MAX_PAYLOAD_BYTES, encode
 
@@ -19,16 +22,70 @@ class WorkerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project: Name = "default"
     agent_id: Name
-    command: list[str] = Field(min_length=2, max_length=64)
+    adapter: Literal["command", "codex"] = "command"
+    command: list[str] | None = Field(default=None, min_length=2, max_length=64)
+    executable: str = "codex"
+    sandbox: Literal["read-only", "workspace-write"] = "read-only"
     cwd: str = "."
     timeout_seconds: int = Field(default=600, ge=1, le=86400, strict=True)
     lease_seconds: int = Field(default=120, ge=60, le=3600, strict=True)
 
+    @model_validator(mode="after")
+    def validate_adapter(self):
+        if (self.adapter == "command") != (self.command is not None):
+            raise ValueError(
+                "Command adapters require a command; built-in adapters do not accept one"
+            )
+        if not self.executable or "\x00" in self.executable:
+            raise ValueError("Invalid adapter executable")
+        return self
+
+
+def load_config(path):
+    try:
+        return WorkerConfig.model_validate_json(path.read_bytes())
+    except ValueError as exc:
+        raise ValueError("Invalid local worker configuration") from exc
+
+
+def adapter_command(config, selection):
+    if config.adapter == "command":
+        return command_arguments(config.command, selection)
+    from .codex_adapter import validate_selection
+
+    validate_selection(selection)
+    return [
+        sys.executable,
+        "-m",
+        "relayfence.codex_adapter",
+        "--executable",
+        config.executable,
+        "--sandbox",
+        config.sandbox,
+        "--model",
+        selection["model"],
+        "--parameters",
+        encode(selection["parameters"]),
+    ]
+
+
+class WorkerError(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: Name
+    message: str = Field(min_length=1, max_length=2000)
+
 
 class WorkerResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    outputs: list[Output] = Field(min_length=1, max_length=16)
+    outputs: list[Output] = Field(default_factory=list, max_length=16)
     reported_model: ModelId | None = None
+    error: WorkerError | None = None
+
+    @model_validator(mode="after")
+    def success_or_failure(self):
+        if bool(self.outputs) == bool(self.error):
+            raise ValueError("Return outputs or an error, never both")
+        return self
 
 
 def command_arguments(command, selection):
@@ -88,9 +145,12 @@ def stop_process(process):
     process.wait(timeout=10)
 
 
-def execute_command(command, cwd, envelope, directory, timeout, heartbeat, interval):
+def execute_command(command, cwd, envelope, directory, timeout, heartbeat, interval, stop=None):
+    if stop is not None and stop.is_set():
+        raise RuntimeError("Runner stopped before execution")
     save_private(directory / "input.json", envelope)
     env = {k: v for k, v in os.environ.items() if k != "RELAYFENCE_TOKEN"}
+    env["RELAYFENCE_RUN_DIRECTORY"] = str(directory)
     with (
         (directory / "input.json").open("rb") as stdin,
         (directory / "stdout.json").open("xb") as stdout,
@@ -114,11 +174,17 @@ def execute_command(command, cwd, envelope, directory, timeout, heartbeat, inter
         next_heartbeat = time.monotonic() + interval
         try:
             while process.poll() is None:
+                if stop is not None and stop.is_set():
+                    raise RuntimeError("Runner stopped before completion")
                 if time.monotonic() >= deadline:
                     raise RuntimeError("Command timed out; inspect the private run directory")
                 if (
                     os.fstat(stdout.fileno()).st_size > MAX_PAYLOAD_BYTES
                     or os.fstat(stderr.fileno()).st_size > 1_048_576
+                    or (
+                        (directory / "codex-events.jsonl").exists()
+                        and (directory / "codex-events.jsonl").stat().st_size > 8_388_608
+                    )
                 ):
                     raise RuntimeError("Command output exceeded its size limit")
                 if time.monotonic() >= next_heartbeat:
@@ -142,15 +208,17 @@ def execute_command(command, cwd, envelope, directory, timeout, heartbeat, inter
         ) from exc
 
 
-def run_task(client: RelayFenceClient, config_path: Path, task_id: str, directory: Path):
+def run_task(client: RelayFenceClient, config_path: Path, task_id: str, directory: Path, stop=None):
     config_path = config_path.resolve()
-    try:
-        config = WorkerConfig.model_validate_json(config_path.read_bytes())
-    except ValueError as exc:
-        raise ValueError("Invalid local worker configuration") from exc
+    config = load_config(config_path)
     cwd = (config_path.parent / config.cwd).resolve()
     if not cwd.is_dir():
         raise ValueError("Worker cwd must be an existing directory")
+    with local_lock(cwd / ".relayfence" / "worker.lock"):
+        return _run_task(client, config, cwd, task_id, directory, stop)
+
+
+def _run_task(client, config, cwd, task_id, directory, stop):
     project = config.project
     task = client.call("task_get", project=project, task_id=task_id)["data"]
     if not task["role_id"]:
@@ -161,7 +229,6 @@ def run_task(client: RelayFenceClient, config_path: Path, task_id: str, director
     agent = client.call("agent_get", project=project, agent_id=config.agent_id)["data"]
     if agent["mode"] != "command":
         raise ValueError("External agents configure their model in their own session")
-    command = command_arguments(config.command, role["selection"])
     directory = directory.resolve()
     directory.mkdir(parents=True, exist_ok=False, mode=0o700)
 
@@ -189,7 +256,6 @@ def run_task(client: RelayFenceClient, config_path: Path, task_id: str, director
     if execution["agent"]["mode"] != "command":
         client.call("task_release", **mutation(**lease))
         raise ValueError("Agent mode changed before claim; inspect configuration")
-    command = command_arguments(config.command, execution["requested"])
     envelope = {
         "task": claim["task"],
         "inputs": claim["inputs"],
@@ -201,6 +267,7 @@ def run_task(client: RelayFenceClient, config_path: Path, task_id: str, director
 
     completion_saved = False
     try:
+        command = adapter_command(config, execution["requested"])
         result = execute_command(
             command,
             cwd,
@@ -208,19 +275,41 @@ def run_task(client: RelayFenceClient, config_path: Path, task_id: str, director
             directory,
             config.timeout_seconds,
             heartbeat,
-            min(20, config.lease_seconds / 3),
+            min(3, config.lease_seconds / 3),
+            stop,
         )
-        request = mutation(**lease, **result.model_dump(mode="json"))
+        if result.error:
+            raise CoordinationError(result.error.code, result.error.message)
+        request = mutation(**lease, **result.model_dump(mode="json", exclude={"error"}))
         save_private(directory / "complete-request.json", request)
         completion_saved = True
         response = client.call("task_complete", **request)
         save_private(directory / "complete-response.json", response)
         return response
-    finally:
+    except BaseException as exc:
         # Once completion was sent, its outcome may be unknown. Preserve its exact
         # request for replay; never release or execute the command a second time.
         if not completion_saved:
             try:
-                client.call("task_release", **mutation(**lease))
-            except CoordinationError:
+                failure = mutation(
+                    **lease,
+                    error_code=exc.code
+                    if isinstance(exc, CoordinationError)
+                    else "execution_failed",
+                    message=(
+                        (
+                            str(exc)
+                            if isinstance(exc, (RuntimeError, ValueError, CoordinationError))
+                            else "Execution interrupted before publication"
+                        )[:1500]
+                        + " · Run: "
+                        + directory.name
+                        + ". Inspect local logs before retrying."
+                    ),
+                )
+                save_private(directory / "failure-request.json", failure)
+                response = client.call("task_fail", **failure)
+                save_private(directory / "failure-response.json", response)
+            except (CoordinationError, OSError):
                 pass
+        raise

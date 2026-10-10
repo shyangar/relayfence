@@ -2,7 +2,20 @@
 
 Initial verification date: 2026-10-10. This file records actual checks and their scope, not a reliability SLA.
 
-## v0.2 local verification
+## v0.3 local verification
+
+- Windows / CPython 3.12.13: **150 pytest cases passed**, combined line/branch coverage **93.86%**; Ruff checks passed.
+
+- Task management: lifecycle transitions, revocation of running leases, operator CAS races, dependency cycles, missing/stale prerequisites, upstream reopening, filtered pagination and task history.
+- Background execution: real adapter subprocesses, global priority across agents, prerequisite handoff, workspace locking, cancellation, explicit retries, failure isolation and shutdown. Configuration paths and credentials stay local.
+- Browser acceptance: the existing 14 role/model checks and 9 new task-management checks pass against real HTTP services in headless Edge, including desktop/390px layouts and untrusted text handling. Run `scripts/check_tasks_console.py` with the same Playwright environment described below.
+- Built-in Codex: installed CLI 0.130.0, configured `gpt-6-astra`/`max`, launched by the dispatcher without desktop interaction. It created `order_total.py` and published a structured artifact. An independent runner executed 54 checks, including 18 unique examples drawn from the previous Codex spec/Harness cases and 36 additional validations. See the [redacted native execution report](verification/native-dispatch.json).
+- Native testing exposed a missing Windows sandbox setting and a false-success condition for blocked model responses. The adapter now preserves the user's configured sandbox implementation and maps blocked/failed responses to failed tasks.
+- The 0.3.0 wheel includes migration 3 and installs into a fresh environment outside the checkout. The six-check real MCP protocol demo and two-role command example pass from that installed wheel.
+
+The native run verifies one Codex model task. It does not certify every CLI version or model, and it does not establish native background execution for DSH/ZCode. The earlier DSH desktop MCP session read a Codex artifact and published test cases; that is separate evidence from the built-in Codex adapter.
+
+## v0.2 historical verification
 
 - Windows, CPython 3.12.13, MCP Python SDK 2.3.0: **107 pytest cases passed**, combined line/branch coverage **93.70%**.
 - Added tests cover instance identity/project scoping, revoked credential replay, model/parameter/capability validation, immutable running snapshots, role rebinding, reassignment, concurrent revision updates and schema-v1 receipt compatibility.
@@ -29,6 +42,6 @@ The CI workflow repeats tests on Ubuntu (Python 3.11 and 3.13), Windows (3.13) a
 
 ## What was not established
 
-The protocol demo uses official SDK clients, including modern and legacy connections. It does not launch Codex, ZCode or DSH model sessions. No model generation, paid API, cross-machine deployment, high-load benchmark, power-loss hardware test or third-party security audit was performed.
+The protocol demo uses official SDK clients, including modern and legacy connections. It does not launch Codex, ZCode or DSH model sessions. The v0.3 Codex test used existing CLI authentication. No separate model API integration, cross-machine deployment, high-load benchmark, power-loss hardware test or third-party security audit was performed.
 
 The process-loss test verifies SQLite rollback/durable commit boundaries. Storage hardware and filesystem behavior remain part of the deployment assumptions.

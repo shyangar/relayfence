@@ -65,6 +65,8 @@ class Registry:
                 "task_heartbeat",
                 "task_release",
                 "task_complete",
+                "task_fail",
+                "runner_heartbeat",
             }:
                 raise CoordinationError(
                     "admin_required", "This operation needs the admin token", status=403
@@ -228,7 +230,9 @@ class Registry:
     def _task_assign(self, db, r, now):
         row = self._task_row(db, r.project, r.task_id)
         self._check_revision(row, r.expected_revision)
-        if row["status"] == "done" or (row["status"] == "running" and row["expires_at"] > now):
+        if row["status"] not in ("ready", "running") or (
+            row["status"] == "running" and row["expires_at"] > now
+        ):
             raise CoordinationError(
                 "invalid_transition",
                 "Release live work or reopen completed work before reassigning",

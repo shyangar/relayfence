@@ -124,11 +124,16 @@ class TaskCreate(Mutation):
     description: str = Field(default="", max_length=8000)
     inputs: list[Name] = Field(default_factory=list, max_length=32)
     role_id: Name | None = None
+    priority: int = Field(default=1, ge=0, le=3, strict=True)
+    due_at: float | None = Field(default=None, ge=0, allow_inf_nan=False, strict=True)
+    depends_on: list[Name] = Field(default_factory=list, max_length=32)
 
     @model_validator(mode="after")
     def distinct_inputs(self):
         if len(set(self.inputs)) != len(self.inputs):
             raise ValueError("input keys must be unique")
+        if len(set(self.depends_on)) != len(self.depends_on):
+            raise ValueError("dependency tasks must be unique")
         return self
 
 
@@ -138,6 +143,11 @@ class TaskGet(Request):
 
 class TasksList(Page):
     available_only: bool = False
+    status: (
+        Literal["ready", "running", "done", "paused", "cancelled", "failed", "blocked"] | None
+    ) = None
+    query: str = Field(default="", max_length=240)
+    role_id: Name | None = None
 
 
 class TaskClaim(Mutation):
@@ -187,12 +197,49 @@ class TaskAssign(TaskReopen):
     role_id: Name | None = None
 
 
+class TaskUpdate(TaskCreate):
+    expected_revision: int = Field(ge=1, le=MAX_INTEGER, strict=True)
+
+
+class TaskControl(TaskReopen):
+    action: Literal["pause", "resume", "cancel", "retry"]
+    reason: str = Field(default="", max_length=2000)
+
+
+class TaskFail(LeaseMutation):
+    error_code: Name
+    message: str = Field(min_length=1, max_length=2000)
+
+
+class RunnerHeartbeat(Mutation):
+    runner_id: Name
+    active_task: Name | None = None
+
+
 class EventsList(Request):
     after: int = Field(default=0, ge=0, le=MAX_INTEGER, strict=True)
     limit: int = Field(default=50, ge=1, le=200, strict=True)
+    subject: Name | None = None
 
 
 OPERATIONS: dict[str, tuple[type[Request], str]] = {
+    "task_update": (
+        TaskUpdate,
+        "Admin: edit inactive work with revision CAS, including priority, due date, role and prerequisite tasks.",
+    ),
+    "task_control": (
+        TaskControl,
+        "Admin: pause, resume, cancel or retry work with revision CAS. Pause/cancel revoke a live lease.",
+    ),
+    "task_fail": (
+        TaskFail,
+        "Record a failed attempt using its live lease. A retry requires an explicit operator action.",
+    ),
+    "runner_heartbeat": (
+        RunnerHeartbeat,
+        "Publish a local dispatcher's availability for the authenticated agent instance.",
+    ),
+    "runners_list": (Request, "List registered local runners and their recent heartbeat status."),
     "agent_put": (
         AgentPut,
         "Admin: create/update an agent's model catalogue and capabilities using revision CAS.",

@@ -41,6 +41,14 @@ stateDiagram-v2
   running --> running: renew live lease
   running --> running: expired takeover / fence + 1
   running --> ready: release live lease
+  ready --> paused: operator pause
+  running --> paused: revoke lease
+  paused --> ready: resume with new execution
+  running --> failed: failed attempt
+  failed --> ready: explicit retry
+  ready --> cancelled: operator cancel
+  running --> cancelled: revoke lease
+  cancelled --> ready: explicit retry
   running --> done: validate + publish atomically
   done --> ready: explicit revision-checked reopen
 ~~~
@@ -63,7 +71,9 @@ Revisions are immutable. Freshness is computed when reading or claiming; there i
 
 Outputs cannot overwrite any direct or transitive input key. This also prevents the common self-invalidating dependency cycle. Multiple output writes are atomic; a conflict in one output rejects the entire completion.
 
-Artifact values are JSON metadata, text, or external references. The service does not fetch URLs, resolve Git SHAs, execute commands, evaluate model output, infer dependencies, or store binary files. The separate CLI worker executes only an operator-supplied local adapter; command configurations never come from the ledger.
+Artifact values are JSON metadata, text, or external references. The service does not fetch URLs, resolve Git SHAs, execute commands, evaluate model output, infer dependencies, or store binary files. The worker executes an operator-configured adapter (built-in Codex or a custom command). The optional local dispatcher may run alongside the server, but executable settings come only from private local files.
+
+Task prerequisites form an acyclic graph. Claim captures prerequisite fence generations and incorporates their outputs into the artifact input snapshot. Reopening/re-executing a prerequisite invalidates the captured generation. The dispatcher polls ready work, sorts by priority/due date, bounds concurrency and uses OS-held workspace locks. It never automatically retries failed tasks or takes over expired running attempts.
 
 ## Role/model snapshots and identity
 
@@ -75,11 +85,11 @@ Selection acknowledgment is not evidence of the actual model. Completion may rep
 
 ## Events and growth
 
-Committed mutations append project-scoped metadata to a globally increasing SQLite event sequence. Gaps within one project are normal because other projects share the sequence. Poll `events_list(after=cursor)`, process the returned events, then save `next_cursor`. Delivery is at least once from the consumer's perspective; consumers should deduplicate by sequence.
+Except for ephemeral runner heartbeats, committed mutations append project-scoped metadata to a globally increasing SQLite event sequence. Gaps within one project are normal because other projects share the sequence. Poll `events_list(after=cursor)`, process the returned events, then save `next_cursor`. Delivery is at least once from the consumer's perspective; consumers should deduplicate by sequence.
 
 Only successful mutations appear in this ledger; failed attempts are not a security audit stream. Events omit input values and lease/instance tokens. Claim/completion events include the execution snapshot, including role instructions and model selection; this can contain sensitive project information.
 
-v0.2 retains revisions, receipts and events indefinitely. Deleting receipts would weaken retry guarantees, so there is intentionally no automatic retention job. Monitor disk use, keep bounded project scopes, and archive whole inactive ledgers. There is no published throughput or scale guarantee.
+v0.3 retains revisions, receipts and events indefinitely. Deleting receipts would weaken retry guarantees, so there is intentionally no automatic retention job. Monitor disk use, keep bounded project scopes, and archive whole inactive ledgers. There is no published throughput or scale guarantee.
 
 ## Why these limits exist
 

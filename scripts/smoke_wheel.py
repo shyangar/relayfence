@@ -1,6 +1,6 @@
 """Install a wheel in an isolated environment and run the real protocol demo.
 
-Run with: uv run python scripts/smoke_wheel.py dist/relayfence-0.2.0-py3-none-any.whl
+Run with: uv run python scripts/smoke_wheel.py dist/relayfence-0.3.0-py3-none-any.whl
 Requires uv on PATH. Nothing is installed into the checkout or global Python.
 """
 
@@ -27,6 +27,7 @@ def main():
                 "from importlib.resources import files; "
                 "assert files('relayfence').joinpath('schema.sql').is_file(); "
                 "assert files('relayfence').joinpath('migration_2.sql').is_file(); "
+                "assert files('relayfence').joinpath('migration_3.sql').is_file(); "
                 "assert files('relayfence').joinpath('dashboard.html').is_file(); "
                 "from relayfence import __version__; print('Installed wheel:', __version__)",
             ],

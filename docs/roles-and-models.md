@@ -61,7 +61,7 @@ Mode **Local command adapter** supports explicit local execution through `relayf
 relayfence worker --config worker.json --task implement-login --token-file /absolute/private/worker.token --run-directory /absolute/private/run-001
 ~~~
 
-`--run-directory` must be new. Paths in `cwd` are relative to the configuration file. Use absolute executable/script paths. This is an explicit one-task command, not a background dispatcher; the HTTP/MCP server never executes a command stored in the registry. There are no bundled vendor launchers or automatic model-list queries in this release.
+`--run-directory` must be new. Paths in `cwd` are relative to the configuration file. Use absolute executable/script paths. This is an explicit one-task command, not a background dispatcher; the HTTP/MCP server never executes a command stored in the registry. For continuous execution and the built-in Codex adapter, see [task management](task-management.md). Model-list queries remain operator-configured.
 
 The worker:
 
@@ -97,7 +97,7 @@ This starts a real HTTP service, registers two credentialed instances, binds two
 - Role edits affect **future claims**, including a reclaim after release/expiry. Running work retains its role revision, instructions, deliverables, agent revision and requested selection. An old owner may finish its live lease even if the role now points elsewhere.
 - `task_assign` uses task revision CAS, accepts a role ID or `null`, and resets only ready/expired work. Old lease tokens cannot submit after reassignment.
 - Disabling an instance or rotating its token blocks old credentials, including replay requests. Give a replacement credential only to the intended instance. The admin token cannot impersonate registered instance actors to retrieve their claim receipts.
-- On process failure before completion, the worker attempts to release its lease. It does not automatically rerun the command.
+- On process failure before completion, the worker attempts to record `task_fail` with its lease. It does not automatically rerun failed work; use Retry after inspecting the cause. Pause/cancel revoke the lease and the worker stops on its next check.
 - Recovery records are written before requests. If completion's response is lost, retry `task_complete` with the saved `complete-request.json`, the same instance token and the same request ID. Inspect current task state before any new execution. A recovered claim receipt is historical and requires a live-lease check/renewal before work.
 - Once a completion request is saved, the worker retains the lease for inspection even if publication is rejected. Resolve the returned error and explicitly release/reclaim as needed. Never rerun an adapter solely because a network reply was lost.
 

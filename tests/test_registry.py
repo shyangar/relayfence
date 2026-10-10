@@ -430,4 +430,4 @@ def test_v1_migration_preserves_fences_null_values_and_receipts(tmp_path):
     with ThreadPoolExecutor(max_workers=3) as pool:
         list(pool.map(lambda _: Store(path), range(3)))
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3

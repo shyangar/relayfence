@@ -18,6 +18,7 @@ from .errors import CoordinationError
 from .identity import ADMIN, Principal
 from .models import Mutation, Request
 from .registry import Registry
+from .task_management import TaskManagement
 
 MAX_PAYLOAD_BYTES = 131_072
 MAX_GRAPH_NODES = 256
@@ -33,7 +34,7 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-class Store(Registry):
+class Store(Registry, TaskManagement):
     encode = staticmethod(encode)
     digest = staticmethod(digest)
 
@@ -47,10 +48,12 @@ class Store(Registry):
             db.execute("BEGIN IMMEDIATE")
             try:
                 version = db.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1, 2):
-                    raise RuntimeError(f"Unsupported database schema {version}; expected 2")
-                scripts = (["schema.sql"] if version == 0 else []) + (
-                    ["migration_2.sql"] if version < 2 else []
+                if version not in (0, 1, 2, 3):
+                    raise RuntimeError(f"Unsupported database schema {version}; expected 3")
+                scripts = (
+                    (["schema.sql"] if version == 0 else [])
+                    + (["migration_2.sql"] if version < 2 else [])
+                    + (["migration_3.sql"] if version < 3 else [])
                 )
                 for name in scripts:
                     sql = files("relayfence").joinpath(name).read_text(encoding="utf-8")
@@ -83,16 +86,21 @@ class Store(Registry):
         }.get(operation, []):
             if payload.get(field) is None:
                 payload.pop(field, None)
+        if operation == "task_create":
+            for field, default in {"priority": 1, "due_at": None, "depends_on": []}.items():
+                if payload.get(field) == default:
+                    payload.pop(field, None)
         raw = encode({"operation": operation, "request": payload})
         if len(raw.encode("utf-8")) > MAX_PAYLOAD_BYTES:
             raise CoordinationError("payload_too_large", "Request exceeds 128 KiB", status=413)
         mutation = isinstance(request, Mutation)
+        receipted = mutation and operation != "runner_heartbeat"
         with self.connection() as db:
             try:
                 db.execute("BEGIN IMMEDIATE" if mutation else "BEGIN")
                 now = self.clock()  # Time is sampled after acquiring the write lock.
                 self._authorize(db, operation, request, principal)
-                if mutation:
+                if receipted:
                     receipt = db.execute(
                         "SELECT digest,response FROM receipts WHERE project=? AND actor=? AND request_id=?",
                         (request.project, request.actor, request.request_id),
@@ -112,7 +120,7 @@ class Store(Registry):
                     "data": getattr(self, "_" + operation)(db, request, now),
                     "replayed": False,
                 }
-                if mutation:
+                if receipted:
                     db.execute(
                         "INSERT INTO receipts VALUES (?,?,?,?,?,?)",
                         (
@@ -284,6 +292,11 @@ class Store(Registry):
     def _task_view(self, db, project, row, now):
         outputs = json.loads(row["outputs"])
         freshness = self._freshness(db, project, outputs)[0] if outputs else None
+        if freshness is not None:
+            changed = self._changed_task_dependencies(db, project, row)
+            if changed:
+                freshness = {**freshness, "fresh": False, "stale_tasks": changed}
+        blockers = self._task_blockers(db, project, row) if row["status"] == "ready" else []
         return {
             "task_id": row["task_id"],
             "title": row["title"],
@@ -301,9 +314,18 @@ class Store(Registry):
             "updated_at": row["updated_at"],
             "role_id": row["role_id"],
             "execution": json.loads(row["execution"]) if row["execution"] else None,
+            "priority": row["priority"],
+            "due_at": row["due_at"],
+            "created_at": row["created_at"],
+            "depends_on": json.loads(row["depends_on"]),
+            "task_snapshot": json.loads(row["task_snapshot"]),
+            "failure": json.loads(row["failure"]) if row["failure"] else None,
+            "blockers": blockers,
+            "display_status": "blocked" if blockers else row["status"],
         }
 
     def _task_create(self, db, r, now):
+        self._validate_task_dependencies(db, r.project, r.task_id, r.depends_on)
         if r.role_id:
             self._registry_row(db, "roles", r.project, r.role_id)
         if db.execute(
@@ -313,8 +335,20 @@ class Store(Registry):
                 "already_exists", "Task ID already exists", {"task_id": r.task_id}
             )
         db.execute(
-            "INSERT INTO tasks(project,task_id,title,description,inputs,status,created_at,updated_at,role_id) VALUES (?,?,?,?,?,'ready',?,?,?)",
-            (r.project, r.task_id, r.title, r.description, encode(r.inputs), now, now, r.role_id),
+            "INSERT INTO tasks(project,task_id,title,description,inputs,status,created_at,updated_at,role_id,priority,due_at,depends_on) VALUES (?,?,?,?,?,'ready',?,?,?,?,?,?)",
+            (
+                r.project,
+                r.task_id,
+                r.title,
+                r.description,
+                encode(r.inputs),
+                now,
+                now,
+                r.role_id,
+                r.priority,
+                r.due_at,
+                encode(r.depends_on),
+            ),
         )
         self._event(db, r, now, "task.created", r.task_id, {"inputs": r.inputs})
         return self._task_get(db, r, now)
@@ -328,18 +362,32 @@ class Store(Registry):
             if r.available_only
             else ""
         )
-        params = (
-            (r.project, r.after, now, r.limit + 1)
-            if r.available_only
-            else (r.project, r.after, r.limit + 1)
-        )
+        params = [r.project, r.after] + ([now] if r.available_only else [])
+        filters = ""
+        if r.status:
+            filters += " AND status=?"
+            params.append("ready" if r.status == "blocked" else r.status)
+        if r.role_id:
+            filters += " AND role_id=?"
+            params.append(r.role_id)
+        if r.query:
+            filters += " AND instr(lower(task_id || ' ' || title || ' ' || description),lower(?))>0"
+            params.append(r.query)
         rows = db.execute(
-            f"SELECT * FROM tasks WHERE project=? AND task_id>? {available} ORDER BY task_id LIMIT ?",
+            f"SELECT * FROM tasks WHERE project=? AND task_id>? {available} {filters} ORDER BY task_id",
             params,
-        ).fetchall()
+        )
+        tasks = []
+        for row in rows:
+            task = self._task_view(db, r.project, row, now)
+            if r.status in ("ready", "blocked") and task["display_status"] != r.status:
+                continue
+            tasks.append(task)
+            if len(tasks) > r.limit:
+                break
         return {
-            "tasks": [self._task_view(db, r.project, row, now) for row in rows[: r.limit]],
-            "next_cursor": rows[r.limit - 1]["task_id"] if len(rows) > r.limit else None,
+            "tasks": tasks[: r.limit],
+            "next_cursor": tasks[r.limit - 1]["task_id"] if len(tasks) > r.limit else None,
         }
 
     def _task_claim(self, db, r, now):
@@ -349,13 +397,30 @@ class Store(Registry):
             raise CoordinationError(
                 "task_done", "Reopen the completed task before claiming it again"
             )
+        if row["status"] not in ("ready", "running"):
+            raise CoordinationError(
+                "invalid_transition", "Resume or retry this task before claiming"
+            )
         if row["status"] == "running" and row["expires_at"] > now:
             raise CoordinationError(
                 "task_busy",
                 "Another live lease owns this task",
                 {"expires_at": row["expires_at"], "fence": row["fence"]},
             )
-        inputs = [self._item(db, r.project, key) for key in json.loads(row["inputs"])]
+        blockers = [b for b in self._task_blockers(db, r.project, row) if b["kind"] == "task"]
+        if blockers:
+            raise CoordinationError(
+                "task_blocked",
+                "Prerequisite tasks are not complete and current",
+                {"blockers": blockers},
+            )
+        task_snapshot = []
+        input_keys = list(json.loads(row["inputs"]))
+        for ident in json.loads(row["depends_on"]):
+            prerequisite = self._task_row(db, r.project, ident)
+            task_snapshot.append({"task_id": ident, "fence": prerequisite["fence"]})
+            input_keys.extend(o["key"] for o in json.loads(prerequisite["outputs"]))
+        inputs = [self._item(db, r.project, key) for key in dict.fromkeys(input_keys)]
         refs = [{"key": item["key"], "version": item["version"]} for item in inputs]
         fresh, _ = self._freshness(db, r.project, refs)
         if not fresh["fresh"]:
@@ -365,7 +430,7 @@ class Store(Registry):
         token = secrets.token_urlsafe(32)
         fence = row["fence"] + 1
         db.execute(
-            "UPDATE tasks SET status='running',revision=revision+1,fence=?,owner=?,lease_hash=?,expires_at=?,snapshot=?,updated_at=?,execution=? WHERE project=? AND task_id=?",
+            "UPDATE tasks SET status='running',revision=revision+1,fence=?,owner=?,lease_hash=?,expires_at=?,snapshot=?,updated_at=?,execution=?,task_snapshot=?,failure=NULL WHERE project=? AND task_id=?",
             (
                 fence,
                 r.actor,
@@ -374,6 +439,7 @@ class Store(Registry):
                 encode(refs),
                 now,
                 encode(execution) if execution else None,
+                encode(task_snapshot),
                 r.project,
                 r.task_id,
             ),
@@ -435,6 +501,13 @@ class Store(Registry):
 
     def _task_complete(self, db, r, now):
         row = self._assert_lease(db, r, now)
+        changed = self._changed_task_dependencies(db, r.project, row)
+        if changed:
+            raise CoordinationError(
+                "stale_input",
+                "Prerequisite tasks changed during execution",
+                {"stale_tasks": changed},
+            )
         execution = json.loads(row["execution"]) if row["execution"] else None
         if r.reported_model:
             if not execution:
@@ -514,9 +587,11 @@ class Store(Registry):
 
     @staticmethod
     def _events_list(db, r, now):
+        subject = " AND subject=?" if r.subject else ""
+        params = [r.project, r.after] + ([r.subject] if r.subject else []) + [r.limit + 1]
         rows = db.execute(
-            "SELECT * FROM events WHERE project=? AND seq>? ORDER BY seq LIMIT ?",
-            (r.project, r.after, r.limit + 1),
+            f"SELECT * FROM events WHERE project=? AND seq>? {subject} ORDER BY seq LIMIT ?",
+            params,
         ).fetchall()
         events = [{**dict(row), "details": json.loads(row["details"])} for row in rows[: r.limit]]
         return {

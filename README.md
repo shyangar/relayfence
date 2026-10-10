@@ -2,7 +2,7 @@
 
 **Shared state and safe handoffs for coding agents that do not share a runtime.**
 
-[中文文档](README.zh-CN.md) · [Roles & models](docs/roles-and-models.md) · [Connect your clients](docs/clients.md) · [Protocol](docs/protocol.md)
+[中文文档](README.zh-CN.md) · [Task management](docs/task-management.md) · [Roles & models](docs/roles-and-models.md) · [Connect your clients](docs/clients.md) · [Protocol](docs/protocol.md)
 
 [![CI](https://github.com/shyangar/relayfence/actions/workflows/ci.yml/badge.svg)](https://github.com/shyangar/relayfence/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-17614e.svg)](LICENSE)
@@ -11,9 +11,17 @@ You change an API contract in one agent. Another agent finishes tests against th
 
 RelayFence puts these handoffs through a small, transactional coordination service. Different MCP clients can share a project, claim work, read versioned inputs, and publish results that are checked against those inputs. Each client keeps its own model, tools, conversation and execution environment.
 
-**v0.2 is an alpha for cooperating agents on one trusted machine.** It provides an authenticated loopback MCP/HTTP server, SQLite persistence, a Python client, a stdio bridge, role/model configuration in the console, and an explicit local command worker. The service and demos make no model calls and require no model API key.
+**v0.3 is an alpha for cooperating agents on one trusted machine.** It provides an authenticated loopback MCP/HTTP server, SQLite persistence, a Python client, a stdio bridge, role/model configuration in the console, task management, a polling dispatcher, a built-in Codex adapter, and a local command worker. The ledger and protocol demos make no model calls and require no model API key.
 
 ![RelayFence console with a stale artifact and task history](docs/assets/console.png)
+
+## Manage and run tasks
+
+Create and edit tasks with priorities, due dates, roles and prerequisite tasks. Filter by status or search, inspect artifacts/history, and pause, resume, cancel or retry from the console. Missing inputs and unfinished prerequisites show as **blocked**.
+
+The local dispatcher starts ready work by priority, then due date. It waits for dependencies, serializes work in the same workspace and records failures for an explicit retry. The built-in Codex adapter uses your installed, authenticated CLI and selected model; no desktop chat is needed. Start with [the setup and task-management guide](docs/task-management.md).
+
+![Task management console](docs/assets/task-management.png)
 
 ## What it enforces
 
@@ -36,7 +44,7 @@ These guarantees apply to the ledger. External file writes, merges, deployments 
 
 In the console, register an **agent instance**, configure its available model IDs and parameter options, then issue its own credential. Create a **role** with instructions and deliverables, select the instance, select a model, and assign tasks to that role. The same software can have multiple instances with different models.
 
-External MCP sessions configure their models in their own client; RelayFence does not switch external conversations. The optional `relayfence worker` command passes the selected model to an operator-configured local adapter and renews the task lease while it runs. Model catalogues are manually configured, and model reports remain explicitly unverified or worker-reported. There are no bundled vendor launchers.
+External MCP sessions configure their models in their own client; RelayFence does not switch external conversations. The optional `relayfence worker` command passes the selected model to an operator-configured local adapter and renews the task lease while it runs. Model catalogues are manually configured, and model reports remain explicitly unverified or worker-reported. The built-in Codex adapter runs an installed CLI without a desktop window. Other tools can use a configured command adapter or external MCP sessions.
 
 Run a real HTTP/subprocess handoff with two **demo model labels** and no LLM calls:
 
@@ -116,7 +124,7 @@ See the runnable [Python handoff example](examples/python_handoff.py) and [agent
 
 ## Small enough to maintain
 
-- One authoritative service and a local SQLite file; no Redis, model runtime, vector database or background scheduler.
+- One authoritative service and a local SQLite file; no Redis, model runtime, vector database or distributed scheduler.
 - One request contract shared by MCP, HTTP and the Python client.
 - Immutable revisions, monotonic task fences, bounded dependency traversal, and durable retry receipts.
 - No provider SDK dependency. The stdio bridge keeps client-specific integration outside the ledger.
@@ -135,7 +143,7 @@ The package is installable from source or the GitHub release wheel. It is **not 
 
 The admin token grants access to the entire service. Instance credentials bind one project and actor and cannot modify registry/assignment settings. A project remains a trusted shared workspace: its instances can read its data and cooperate on shared state. Legacy unregistered actors retain the service-token workflow. Keep credentials, run directories and databases private; use separate services for untrusted teams.
 
-The HTTP/MCP service does not automatically launch, wake or stop agent software. Local execution requires an explicit `relayfence worker` command with a trusted local adapter. Clients must choose to call tools and poll events. The ledger tracks only declared dependencies and writes made through its API. There is no multi-host replication, external side-effect exactly-once guarantee, automatic conflict merge, or semantic correctness judgment.
+Local execution is opt-in: `serve --dispatcher <config>` starts configured background workers, while `relayfence worker` runs one task. No desktop windows are required for the Codex adapter. The server never executes commands supplied through its API. Clients must choose to call tools and poll events. The ledger tracks only declared dependencies and writes made through its API. There is no multi-host replication, external side-effect exactly-once guarantee, automatic conflict merge, or semantic correctness judgment.
 
 Before upgrading from v0.1, back up and stop the old service. Opening the ledger in v0.2 transactionally migrates it to schema 2 while preserving old fences and receipt hashes. The upgraded ledger cannot be reopened with v0.1.
 

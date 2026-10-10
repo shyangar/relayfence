@@ -404,6 +404,37 @@
         border-radius: 50%;
         margin-right: 8px;
       }
+      .task-toolbar {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      .task-toolbar label {
+        flex: 1;
+        min-width: 150px;
+      }
+      .task-actions {
+        margin-top: 12px;
+      }
+      .task-actions button {
+        font-size: 12px;
+        padding: 6px 10px;
+      }
+      .task-description {
+        margin-top: 10px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      #task-message {
+        padding: 10px 20px;
+        min-height: 40px;
+      }
+      #runners {
+        margin: 16px 0;
+        padding: 14px 20px;
+      }
       @media (max-width: 780px) {
         .columns {
           grid-template-columns: 1fr;
@@ -493,6 +524,94 @@
       <div id="status" class="status" role="status" aria-live="polite">
         Connect to view your project. The token stays in this tab's memory.
       </div>
+      <div class="stats">
+        <div class="stat">
+          <strong id="live-count">—</strong
+          ><span>Active leases on this page</span>
+        </div>
+        <div class="stat">
+          <strong id="ready-count">—</strong
+          ><span>Available tasks on this page</span>
+        </div>
+        <div class="stat">
+          <strong id="stale-count">—</strong
+          ><span>Stale artifacts on this page</span>
+        </div>
+      </div>
+      <div class="columns">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Tasks</h2>
+            <span class="count" id="task-count">Awaiting connection</span>
+            <button type="button" id="create-task">New task</button>
+          </div>
+          <form id="task-filters" class="task-toolbar">
+            <label
+              >Search<input
+                id="task-search"
+                placeholder="Title, ID or description"
+                maxlength="240"
+            /></label>
+            <label
+              >Status<select id="task-status">
+                <option value="">All statuses</option>
+                <option value="ready">Ready</option>
+                <option value="blocked">Blocked</option>
+                <option value="running">Running</option>
+                <option value="paused">Paused</option>
+                <option value="failed">Failed</option>
+                <option value="done">Done</option>
+                <option value="cancelled">Cancelled</option>
+              </select></label
+            >
+            <button class="quiet" type="submit">Apply</button>
+          </form>
+          <div id="task-message" class="hint" role="status" aria-live="polite">
+            Create work here; configured background runners pick up ready tasks.
+          </div>
+          <div id="tasks" class="rows">
+            <div class="empty">
+              Task ownership and lease deadlines appear here.
+            </div>
+          </div>
+          <div class="pager">
+            <button id="tasks-first" class="quiet" disabled>First page</button
+            ><button id="tasks-next" class="quiet" disabled>Next page →</button>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <h2>State &amp; artifacts</h2>
+            <span class="count" id="item-count">Awaiting connection</span>
+          </div>
+          <div id="items" class="rows">
+            <div class="empty">
+              Versioned inputs and published results appear here.
+            </div>
+          </div>
+          <div class="pager">
+            <button id="items-first" class="quiet" disabled>First page</button
+            ><button id="items-next" class="quiet" disabled>Next page →</button>
+          </div>
+        </section>
+      </div>
+      <section id="runners" class="panel" aria-label="Background runners">
+        Connect to see background runners.
+      </section>
+      <section id="task-detail" class="panel setup" hidden>
+        <div class="panel-head">
+          <h2 id="detail-title">Task details</h2>
+          <button class="quiet" id="close-detail">Close</button>
+        </div>
+        <div class="setup-body">
+          <div id="detail-content"></div>
+          <h3>Task history</h3>
+          <div id="detail-history"></div>
+          <button class="quiet" id="history-more" hidden>
+            Load more history
+          </button>
+        </div>
+      </section>
       <details class="panel setup" id="setup" open>
         <summary>Roles &amp; model selection</summary>
         <div class="setup-body">
@@ -556,11 +675,10 @@
               </form>
             </div>
             <div>
-              <h2>Assign work</h2>
+              <h2>Task editor</h2>
               <form id="assignment-form" class="editor">
                 <p class="hint">
-                  Create a task here, or select Reassign on an available task
-                  below.
+                  Describe the work, choose a role and set its prerequisites.
                 </p>
                 <label
                   >Task ID<input
@@ -582,6 +700,31 @@
                     placeholder="api/spec, build/result"
                 /></label>
                 <label>Role<select id="assignment-role"></select></label>
+                <label
+                  >Description<textarea
+                    id="assignment-description"
+                    maxlength="8000"
+                    placeholder="What should be delivered, and how will it be checked?"
+                  ></textarea>
+                </label>
+                <div class="pair">
+                  <label
+                    >Priority<select id="assignment-priority">
+                      <option value="0">Low</option>
+                      <option value="1" selected>Normal</option>
+                      <option value="2">High</option>
+                      <option value="3">Urgent</option>
+                    </select></label
+                  >
+                  <label
+                    >Due date<input id="assignment-due" type="datetime-local"
+                  /></label>
+                </div>
+                <label
+                  >Prerequisite task IDs · comma separated<input
+                    id="assignment-dependencies"
+                    placeholder="design-api, implement-api"
+                /></label>
                 <div class="actions">
                   <button type="submit" id="save-assignment">Create task</button
                   ><button type="button" id="new-assignment" class="quiet">
@@ -681,52 +824,6 @@
           </div>
         </div>
       </details>
-      <div class="stats">
-        <div class="stat">
-          <strong id="live-count">—</strong
-          ><span>Active leases on this page</span>
-        </div>
-        <div class="stat">
-          <strong id="ready-count">—</strong
-          ><span>Available tasks on this page</span>
-        </div>
-        <div class="stat">
-          <strong id="stale-count">—</strong
-          ><span>Stale artifacts on this page</span>
-        </div>
-      </div>
-      <div class="columns">
-        <section class="panel">
-          <div class="panel-head">
-            <h2>Tasks</h2>
-            <span class="count" id="task-count">Awaiting connection</span>
-          </div>
-          <div id="tasks" class="rows">
-            <div class="empty">
-              Task ownership and lease deadlines appear here.
-            </div>
-          </div>
-          <div class="pager">
-            <button id="tasks-first" class="quiet" disabled>First page</button
-            ><button id="tasks-next" class="quiet" disabled>Next page →</button>
-          </div>
-        </section>
-        <section class="panel">
-          <div class="panel-head">
-            <h2>State &amp; artifacts</h2>
-            <span class="count" id="item-count">Awaiting connection</span>
-          </div>
-          <div id="items" class="rows">
-            <div class="empty">
-              Versioned inputs and published results appear here.
-            </div>
-          </div>
-          <div class="pager">
-            <button id="items-first" class="quiet" disabled>First page</button
-            ><button id="items-next" class="quiet" disabled>Next page →</button>
-          </div>
-        </section>
-      </div>
       <section class="panel timeline">
         <div class="panel-head">
           <h2>Activity</h2>
@@ -758,6 +855,10 @@
         taskNext = null,
         itemNext = null,
         generation = 0;
+      let taskQuery = "",
+        taskStatus = "",
+        selectedTask = null,
+        historyCursor = 0;
       const node = (tag, cls, text) => {
         const n = document.createElement(tag);
         n.className = cls || "";
@@ -799,7 +900,7 @@
                 task.result_freshness &&
                 !task.result_freshness.fresh
               ? "done · stale"
-              : task.status;
+              : task.display_status;
           top.append(
             node(
               "span",
@@ -824,6 +925,37 @@
                 task.fence,
             ),
           );
+          row.dataset.taskId = task.task_id;
+          row.append(
+            node(
+              "div",
+              "meta",
+              ["Low", "Normal", "High", "Urgent"][task.priority] +
+                " priority" +
+                (task.due_at
+                  ? " · Due " + new Date(task.due_at * 1000).toLocaleString()
+                  : ""),
+            ),
+          );
+          if (task.blockers.length)
+            row.append(
+              node(
+                "div",
+                "meta",
+                "Waiting: " +
+                  task.blockers
+                    .map((b) => b.key + " (" + b.reason + ")")
+                    .join(", "),
+              ),
+            );
+          if (task.failure)
+            row.append(
+              node(
+                "div",
+                "meta",
+                task.failure.code + ": " + task.failure.message,
+              ),
+            );
           if (task.owner)
             row.append(
               node(
@@ -866,29 +998,182 @@
             );
             row.append(detail);
           }
-          if (task.status === "ready" || task.lease_expired) {
-            const reassign = node("button", "quiet", "Reassign");
-            reassign.type = "button";
-            reassign.addEventListener("click", () => editAssignment(task));
-            row.append(reassign);
-          }
+          const actions = node("div", "actions task-actions");
+          const action = (label, callback) => {
+            const b = node("button", "quiet", label);
+            b.type = "button";
+            b.addEventListener("click", callback);
+            actions.append(b);
+          };
+          action("Details & history", () => showTask(task.task_id));
+          if (!["running", "done"].includes(task.status))
+            action("Edit / reassign", () => editAssignment(task));
+          if (["ready", "running"].includes(task.status))
+            action("Pause", () => controlTask(task, "pause"));
+          if (task.status === "paused")
+            action("Resume", () => controlTask(task, "resume"));
+          if (["ready", "running", "paused", "failed"].includes(task.status))
+            action("Cancel", () => controlTask(task, "cancel"));
+          if (
+            ["failed", "cancelled"].includes(task.status) ||
+            task.lease_expired
+          )
+            action("Retry", () => controlTask(task, "retry"));
+          if (task.status === "done")
+            action("Reopen", () =>
+              write(
+                "task_reopen",
+                { task_id: task.task_id, expected_revision: task.revision },
+                () => {},
+              ),
+            );
+          row.append(actions);
           target.append(row);
         }
         if (!data.tasks.length)
           empty(
             "tasks",
-            "No tasks on this page. Create one from an agent or the API.",
+            "No matching tasks. Use New task to add work, or change the filters.",
           );
         el("task-count").textContent = data.tasks.length + " on this page";
         el("live-count").textContent = data.tasks.filter(
           (t) => t.status === "running" && !t.lease_expired,
         ).length;
         el("ready-count").textContent = data.tasks.filter(
-          (t) => t.status === "ready" || t.lease_expired,
+          (t) => t.display_status === "ready",
         ).length;
         taskNext = data.next_cursor;
         el("tasks-next").disabled = !taskNext;
         el("tasks-first").disabled = !taskCursor;
+      }
+      async function controlTask(task, action) {
+        const current = generation;
+        try {
+          const latest = await call("task_get", { task_id: task.task_id });
+          if (current !== generation) return;
+          if (
+            latest.fence !== task.fence ||
+            latest.status !== task.status ||
+            (latest.status !== "running" && latest.revision !== task.revision)
+          ) {
+            throw new Error(
+              "Task changed. Refresh and review its current state before applying this action.",
+            );
+          }
+          await write(
+            "task_control",
+            {
+              task_id: latest.task_id,
+              expected_revision: latest.revision,
+              action,
+            },
+            () => {},
+          );
+        } catch (error) {
+          configurationStatus(error.message, true);
+        }
+      }
+      async function showTask(id) {
+        const current = generation;
+        selectedTask = id;
+        historyCursor = 0;
+        el("detail-history").replaceChildren();
+        try {
+          const task = await call("task_get", { task_id: id });
+          if (current !== generation || selectedTask !== id) return;
+          el("detail-title").textContent = task.title;
+          el("task-detail").hidden = false;
+          const content = el("detail-content");
+          content.replaceChildren(
+            node(
+              "p",
+              "task-description",
+              task.description || "No description.",
+            ),
+            node(
+              "p",
+              "meta",
+              "Prerequisites: " + (task.depends_on.join(", ") || "None"),
+            ),
+            node("pre", "", JSON.stringify(task, null, 2)),
+          );
+          for (const output of task.outputs) {
+            const artifact = await call("item_get", {
+              key: output.key,
+              version: output.version,
+            });
+            if (current !== generation || selectedTask !== id) return;
+            content.append(
+              node("h3", "", output.key + " @" + output.version),
+              node("pre", "", JSON.stringify(artifact.value, null, 2)),
+            );
+          }
+          await loadHistory();
+          el("task-detail").scrollIntoView({
+            behavior: "smooth",
+            block: "start",
+          });
+        } catch (error) {
+          el("task-message").textContent = error.message;
+        }
+      }
+      async function loadHistory() {
+        const id = selectedTask,
+          current = generation;
+        try {
+          const data = await call("events_list", {
+            subject: id,
+            after: historyCursor,
+            limit: 50,
+          });
+          if (current !== generation || id !== selectedTask) return;
+          for (const event of data.events)
+            el("detail-history").append(
+              node(
+                "div",
+                "binding",
+                new Date(event.created_at * 1000).toLocaleString() +
+                  " · " +
+                  event.kind +
+                  " · " +
+                  event.actor +
+                  " · " +
+                  JSON.stringify(event.details),
+              ),
+            );
+          historyCursor = data.next_cursor;
+          el("history-more").hidden = !data.has_more;
+        } catch (error) {
+          el("task-message").textContent = error.message;
+        }
+      }
+      function renderRunners(data) {
+        const target = el("runners");
+        target.replaceChildren(node("h2", "", "Background runners"));
+        if (!data.runners.length)
+          target.append(
+            node(
+              "p",
+              "hint",
+              "No runner connected. Start RelayFence with --dispatcher and a local worker configuration.",
+            ),
+          );
+        for (const r of data.runners)
+          target.append(
+            node(
+              "div",
+              "binding",
+              r.agent_id +
+                " · " +
+                (r.online
+                  ? r.active_task
+                    ? "Working on " + r.active_task
+                    : "Online · waiting for ready work"
+                  : "Offline") +
+                " · Last seen " +
+                new Date(r.updated_at * 1000).toLocaleTimeString(),
+            ),
+          );
       }
       function renderItems(data) {
         const target = el("items");
@@ -985,16 +1270,29 @@
         busy = true;
         const current = generation;
         try {
-          const [tasks, items, activity, registryAgents, registryRoles] =
-            await Promise.all([
-              call("tasks_list", { after: taskCursor, limit: 50 }),
-              call("items_list", { after: itemCursor, limit: 50 }),
-              call("events_list", { after: eventCursor, limit: 200 }),
-              listAll("agents_list", "agents"),
-              listAll("roles_list", "roles"),
-            ]);
+          const [
+            tasks,
+            items,
+            activity,
+            registryAgents,
+            registryRoles,
+            runners,
+          ] = await Promise.all([
+            call("tasks_list", {
+              after: taskCursor,
+              limit: 50,
+              query: taskQuery,
+              status: taskStatus || null,
+            }),
+            call("items_list", { after: itemCursor, limit: 50 }),
+            call("events_list", { after: eventCursor, limit: 200 }),
+            listAll("agents_list", "agents"),
+            listAll("roles_list", "roles"),
+            call("runners_list"),
+          ]);
           if (current !== generation) return;
           renderTasks(tasks);
+          renderRunners(runners);
           renderItems(items);
           renderRegistry(registryAgents, registryRoles);
           eventCursor = activity.next_cursor;
@@ -1031,6 +1329,11 @@
         events = [];
         taskCursor = "";
         itemCursor = "";
+        selectedTask = null;
+        el("task-detail").hidden = true;
+        taskQuery = taskStatus = "";
+        el("task-search").value = el("task-status").value = "";
+        el("runners").textContent = "Loading background runners…";
         empty("tasks", "Loading project tasks…");
         empty("items", "Loading project state…");
         empty("events", "Loading project activity…");
@@ -1076,6 +1379,7 @@
           .filter(Boolean);
       function configurationStatus(message, error = false) {
         el("configuration-status").textContent = message;
+        el("task-message").textContent = message;
         el("configuration-status").style.color = error
           ? "var(--red)"
           : "var(--muted)";
@@ -1110,9 +1414,7 @@
           const data = await call(operation, request);
           pendingWrites.delete(key);
           onSuccess(data);
-          configurationStatus(
-            "Saved. Future claims use the current binding; existing claims keep their snapshot.",
-          );
+          configurationStatus("Saved successfully.");
           await refresh();
         } catch (error) {
           configurationStatus(
@@ -1352,14 +1654,23 @@
         el("assignment-id").value = task?.task_id || "";
         el("assignment-id").readOnly = Boolean(task);
         el("assignment-title").value = task?.title || "";
-        el("assignment-title").required = !task;
+        el("assignment-title").required = true;
         el("assignment-title-label").hidden = el(
           "assignment-inputs-label",
-        ).hidden = Boolean(task);
-        el("assignment-inputs").value = "";
+        ).hidden = false;
+        el("assignment-inputs").value = task?.inputs.join(", ") || "";
+        el("assignment-description").value = task?.description || "";
+        el("assignment-priority").value = String(task?.priority ?? 1);
+        el("assignment-dependencies").value = task?.depends_on.join(", ") || "";
+        const due = task?.due_at ? new Date(task.due_at * 1000) : null;
+        el("assignment-due").value = due
+          ? new Date(due.getTime() - due.getTimezoneOffset() * 60000)
+              .toISOString()
+              .slice(0, 16)
+          : "";
         el("assignment-role").value = task?.role_id || "";
         el("save-assignment").textContent = task
-          ? "Save assignment · revision " + task.revision
+          ? "Save task · revision " + task.revision
           : "Create task";
         if (task) {
           el("setup").open = true;
@@ -1440,13 +1751,21 @@
         const payload = {
           task_id: el("assignment-id").value.trim(),
           role_id: el("assignment-role").value || null,
+          title: el("assignment-title").value.trim(),
+          inputs: splitComma(el("assignment-inputs").value),
+          description: el("assignment-description").value,
+          priority: Number(el("assignment-priority").value),
+          due_at: el("assignment-due").value
+            ? new Date(el("assignment-due").value).getTime() / 1000
+            : null,
+          depends_on: splitComma(el("assignment-dependencies").value),
         };
         if (editingTask) payload.expected_revision = editingTask.revision;
         else {
           payload.title = el("assignment-title").value.trim();
           payload.inputs = splitComma(el("assignment-inputs").value);
         }
-        write(editingTask ? "task_assign" : "task_create", payload, () =>
+        write(editingTask ? "task_update" : "task_create", payload, () =>
           editAssignment(),
         );
       });
@@ -1457,6 +1776,27 @@
       el("new-agent").addEventListener("click", () => editAgent());
       el("new-role").addEventListener("click", () => editRole());
       el("new-assignment").addEventListener("click", () => editAssignment());
+      el("create-task").addEventListener("click", () => {
+        editAssignment();
+        el("setup").open = true;
+        el("assignment-form").scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+        });
+      });
+      el("task-filters").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (busy) return;
+        taskQuery = el("task-search").value.trim();
+        taskStatus = el("task-status").value;
+        taskCursor = "";
+        refresh();
+      });
+      el("close-detail").addEventListener("click", () => {
+        selectedTask = null;
+        el("task-detail").hidden = true;
+      });
+      el("history-more").addEventListener("click", loadHistory);
       el("add-model").addEventListener("click", () => addModel());
       el("clear-credential").addEventListener("click", clearCredential);
       el("download-credential").addEventListener("click", () => {

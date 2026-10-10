@@ -81,14 +81,27 @@ def test_real_command_receives_selected_model_and_parameters_and_publishes(
         ("print('x'*140000)", "128 KiB|size limit"),
     ],
 )
-def test_failed_command_releases_without_publishing(command_task, tmp_path, body, message):
+def test_failed_command_records_failure_without_publishing(command_task, tmp_path, body, message):
     client, config, ledger, _ = command_task
     data = json.loads(config.read_text())
     Path(data["command"][1]).write_text(body)
     with pytest.raises(RuntimeError, match=message):
         run_task(client, config, "t", tmp_path / "failed")
-    assert ledger.ok("task_get", task_id="t")["status"] == "ready"
+    assert ledger.ok("task_get", task_id="t")["status"] == "failed"
     assert ledger.ok("items_list")["items"] == []
+
+
+def test_adapter_reported_blocker_becomes_failed_not_done(command_task, tmp_path):
+    client, config, ledger, _ = command_task
+    data = json.loads(config.read_text())
+    Path(data["command"][1]).write_text(
+        "import json\nprint(json.dumps({'error':{'code':'agent_blocked','message':'Workspace is read only'}}))\n"
+    )
+    with pytest.raises(CoordinationError, match="read only"):
+        run_task(client, config, "t", tmp_path / "blocked")
+    task = ledger.ok("task_get", task_id="t")
+    assert task["status"] == "failed" and task["failure"]["code"] == "agent_blocked"
+    assert "read only" in task["failure"]["message"] and not task["outputs"]
 
 
 def test_unknown_completion_preserves_exact_request_without_release(command_task, tmp_path):

@@ -1,0 +1,23 @@
+{
+  "date": "2026-10-10",
+  "status": "passed",
+  "runner": "RelayFence built-in Codex adapter launched by local dispatcher",
+  "client_version": "Codex CLI 0.130.0",
+  "configured_model": "gpt-6-astra",
+  "parameters": {
+    "reasoning_effort": "max"
+  },
+  "model_evidence": "unverified",
+  "desktop_ui_required": false,
+  "artifact_created": true,
+  "file_created": "order_total.py",
+  "source_sha256": "d50dc7b6ede8e567af8c27b47678ad898f1b347be5e94ddd1cb25098a454cc3c",
+  "independent_checks": {
+    "prior_spec_and_harness_examples": 26,
+    "unique_examples": 18,
+    "additional_validation_cases": 36,
+    "total_executed": 54,
+    "input_preservation_checked": true
+  },
+  "scope": "One real model task through the built-in dispatcher. Cross-agent scheduling uses separate protocol and subprocess tests. DSH native background launching remains unimplemented."
+}
