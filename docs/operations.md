@@ -2,7 +2,7 @@
 
 ## Files and service lifecycle
 
-`relayfence init --directory <directory>` creates an access token and a schema-v1 SQLite ledger. Re-running init preserves existing files. `serve` reads `RELAYFENCE_TOKEN` first if that environment variable exists, otherwise the configured token file. An empty environment value is an error, not an instruction to disable authentication.
+`relayfence init --directory <directory>` creates an admin access token and a schema-v2 SQLite ledger. Re-running init preserves existing files and applies supported migrations. `serve` reads `RELAYFENCE_TOKEN` first if that environment variable exists, otherwise the configured token file. An empty environment value is an error, not an instruction to disable authentication.
 
 The default directory is `.relayfence` relative to the current terminal, so use an absolute `--directory` in scripts/services. Windows, macOS and Linux are supported targets. Only loopback listeners (`127.0.0.1` or `::1`) are exposed by the CLI.
 
@@ -32,19 +32,19 @@ The command uses SQLite's online backup API, so committed WAL changes are includ
 
 Restoring an older backup also restores older fence counters and receipts. Treat it as a new coordination epoch: retire old clients/endpoints, rotate the access token, and never rely on old fencing numbers to authorize an external system after rollback. Lost post-backup writes cannot be reconstructed automatically.
 
-An unknown database schema version fails at startup. There is no migration command yet because this release introduces schema 1. Future migrations must preserve monotonic fences and receipt semantics.
+An unknown database schema version fails at startup. v0.2 migrates schema 1 to 2 inside one write transaction. Back up with v0.1 first, stop old service processes, then start v0.2. Migration preserves fences and receipt hashes, including JSON null values, and adds empty registries and nullable assignment fields. Do not run v0.1 against an upgraded database. Rollback requires the pre-upgrade backup and the new-epoch precautions described above; there is no downgrade migration.
 
 ## Token rotation and trust
 
-Stop the service, replace the access token with a new high-entropy value (at least 32 ASCII characters without whitespace), update clients, and restart. Tokens have no runtime reload or expiry.
+For the admin token, stop the service, replace it with a new high-entropy value (at least 32 ASCII characters without whitespace), update clients, and restart. Instance credentials support online `agent_token_rotate` with revision CAS. Rotation or disabling immediately denies old credentials, including receipt replays. A replacement credential for the same instance can renew its existing lease. Replayed rotation receipts return historical tokens, which may already be revoked by a subsequent rotation; use a new request ID/current revision for an intentional new rotation.
 
 On POSIX, init creates the token as mode `0600` and a newly created instance directory as `0700`. Windows uses inherited ACLs: choose a directory accessible only to the intended user. Existing directory permissions are not silently rewritten. Secure the ledger and backups as carefully as the token.
 
-The shared token authenticates access to the **whole service**. Projects are namespaces; actor names are labels; lease tokens are ownership capabilities. This is intended for cooperating agents under the same trust boundary, not hostile multi-tenant isolation. Separate trust groups need separate instances.
+The admin token accesses the **whole service**. Instance tokens authenticate one registered actor in one project. Instances can read project data, mutate shared state, create tasks and hold leases, but cannot edit profiles, roles, credentials or assignments. Admin calls cannot impersonate registered actors. Legacy unregistered actors remain supported with the admin token. This is for cooperating agents under the same trust boundary, not hostile multi-tenant isolation. Separate trust groups need separate service instances.
 
 ## Other machines
 
-v0.1 does not expose a public listener. If you need a remote client, keep the service on loopback and use an SSH local port forward to it. Point clients to the forwarded loopback URL and supply the RelayFence token through a private channel. A bridge can use an HTTPS URL provided by your infrastructure, but configuring and securing an external reverse proxy is outside this release's tested deployment.
+v0.2 does not expose a public listener. If you need a remote client, keep the service on loopback and use an SSH local port forward to it. Point clients to the forwarded loopback URL and supply the RelayFence token through a private channel. A bridge can use an HTTPS URL provided by your infrastructure, but configuring and securing an external reverse proxy is outside this release's tested deployment.
 
 Do not disable Host/Origin validation to make an arbitrary hostname work. Both REST and MCP require a bearer token; browser requests also need an allowed same origin. No CORS wildcard is enabled.
 

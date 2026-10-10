@@ -17,7 +17,7 @@ The package has no model provider, agent framework, or FlowTrial dependency. Do 
 Every mutation opens its own connection and executes `BEGIN IMMEDIATE`. There is no process-local ownership map.
 
 1. Acquire SQLite's write lock; only then sample service time.
-2. Look up the receipt under `(project, actor, request_id)`.
+2. Recheck authenticated instance/project permissions, then look up the receipt under `(project, actor, request_id)`.
 3. If it exists, compare the canonical operation/payload digest. Return the original success if identical; otherwise reject.
 4. Check current versions, task status, lease and declared dependencies.
 5. Write new immutable revisions and advance heads/task status.
@@ -63,16 +63,24 @@ Revisions are immutable. Freshness is computed when reading or claiming; there i
 
 Outputs cannot overwrite any direct or transitive input key. This also prevents the common self-invalidating dependency cycle. Multiple output writes are atomic; a conflict in one output rejects the entire completion.
 
-Artifact values are JSON metadata, text, or external references. RelayFence does not fetch URLs, resolve Git SHAs, execute commands, evaluate model output, infer dependencies, or store binary files.
+Artifact values are JSON metadata, text, or external references. The service does not fetch URLs, resolve Git SHAs, execute commands, evaluate model output, infer dependencies, or store binary files. The separate CLI worker executes only an operator-supplied local adapter; command configurations never come from the ledger.
+
+## Role/model snapshots and identity
+
+Agent instances declare software, external/command mode, capabilities and model catalogues. Roles bind one instance to a model/parameter selection with revision CAS. Claim validates the binding under the lease transaction's write lock and snapshots instructions, deliverables and execution configuration. Role edits affect future claims; live owners may finish against their saved configuration. Reassignment is limited to ready/expired work and revokes the old lease.
+
+The admin service token manages configuration. Instance token hashes identify one project/actor and are rechecked before receipt replay. MCP obtains this identity through the [SDK's injected request context](https://py.sdk.modelcontextprotocol.io/handlers/context/), never a tool argument. Admin calls cannot impersonate registered actors. Credential-rotation receipts contain raw secrets and must be protected alongside claim receipts.
+
+Selection acknowledgment is not evidence of the actual model. Completion may report a model; a mismatch against an explicit selection rejects publication. Missing evidence remains `unverified`; `worker_reported` is not independently attested. Capabilities and deliverables are declarative, not semantic verification.
 
 ## Events and growth
 
 Committed mutations append project-scoped metadata to a globally increasing SQLite event sequence. Gaps within one project are normal because other projects share the sequence. Poll `events_list(after=cursor)`, process the returned events, then save `next_cursor`. Delivery is at least once from the consumer's perspective; consumers should deduplicate by sequence.
 
-Only successful mutations appear in this ledger; failed attempts are not a security audit stream. Events omit input values and lease tokens, but subject/actor names and dependency keys may themselves be sensitive.
+Only successful mutations appear in this ledger; failed attempts are not a security audit stream. Events omit input values and lease/instance tokens. Claim/completion events include the execution snapshot, including role instructions and model selection; this can contain sensitive project information.
 
-v0.1 retains revisions, receipts and events indefinitely. Deleting receipts would weaken retry guarantees, so there is intentionally no automatic retention job. Monitor disk use, keep bounded project scopes, and archive whole inactive ledgers. There is no published throughput or scale guarantee.
+v0.2 retains revisions, receipts and events indefinitely. Deleting receipts would weaken retry guarantees, so there is intentionally no automatic retention job. Monitor disk use, keep bounded project scopes, and archive whole inactive ledgers. There is no published throughput or scale guarantee.
 
 ## Why these limits exist
 
-The initial boundary makes the concurrency guarantees inspectable and keeps client adapters small. Untrusted tenants need authenticated identities and project authorization. Independent service replicas need a shared transactional backend and carefully designed fencing. External writes need an enforcement point that checks ownership. These are separate design changes, not flags that make a local ledger distributed.
+The boundary keeps concurrency guarantees inspectable and adapters small. Instance identities reduce accidental cross-role access but do not create a hostile multi-tenant sandbox. Independent replicas need a shared transactional backend; external writes need an enforcement point. These require separate design work.

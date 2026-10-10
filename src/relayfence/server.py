@@ -12,18 +12,20 @@ from starlette.routing import Route
 
 from . import __version__
 from .errors import CoordinationError
+from .identity import ADMIN, Principal
 from .mcp_server import make_mcp
 from .models import OPERATIONS
 from .service import Service
-from .store import MAX_PAYLOAD_BYTES, Store
+from .store import MAX_PAYLOAD_BYTES, Store, digest
 
 
 class LocalBoundary:
     """Host/Origin checks also cover REST and the dashboard, outside the MCP SDK."""
 
-    def __init__(self, app, token):
+    def __init__(self, app, token, store):
         self.app = app
         self.authorization = ("Bearer " + token).encode("utf-8")
+        self.store = store
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -46,12 +48,22 @@ class LocalBoundary:
             error = CoordinationError(
                 "invalid_origin", "Cross-origin requests are not allowed", status=403
             )
-        elif scope["path"] not in ("/", "/healthz") and not secrets.compare_digest(
-            headers.get(b"authorization", b""), self.authorization
-        ):
-            error = CoordinationError(
-                "unauthorized", "A valid RelayFence bearer token is required", status=401
-            )
+        elif scope["path"] not in ("/", "/healthz"):
+            authorization = headers.get(b"authorization", b"")
+            if secrets.compare_digest(authorization, self.authorization):
+                scope["relayfence_principal"] = ADMIN
+            else:
+                hashed = (
+                    digest(authorization[7:].decode("latin-1"))
+                    if authorization.startswith(b"Bearer ")
+                    else ""
+                )
+                if hashed and await anyio.to_thread.run_sync(self.store.credential_valid, hashed):
+                    scope["relayfence_principal"] = Principal(token_hash=hashed)
+                else:
+                    error = CoordinationError(
+                        "unauthorized", "A valid RelayFence bearer token is required", status=401
+                    )
         if error:
             response = JSONResponse(
                 error.as_dict(), status_code=error.status, headers={"Cache-Control": "no-store"}
@@ -64,7 +76,7 @@ def create_app(store: Store, token: str):
     if len(token) < 32 or not token.isascii() or any(c.isspace() for c in token):
         raise ValueError("Access token must be at least 32 ASCII characters without whitespace")
     service = Service(store)
-    mcp = make_mcp(service.call)
+    mcp = make_mcp(service.call, authenticated=True)
     app = mcp.streamable_http_app(
         json_response=True, stateless_http=True, max_request_body_size=MAX_PAYLOAD_BYTES + 65536
     )
@@ -101,7 +113,10 @@ def create_app(store: Store, token: str):
                 status_code=400,
             )
         result, status = await anyio.to_thread.run_sync(
-            service.call, request.path_params["operation"], payload
+            service.call,
+            request.path_params["operation"],
+            payload,
+            request.scope.get("relayfence_principal", Principal()),
         )
         return JSONResponse(result, status_code=status, headers={"Cache-Control": "no-store"})
 
@@ -121,4 +136,4 @@ def create_app(store: Store, token: str):
         Route("/v1/schema", schema),
         Route("/v1/{operation}", call, methods=["POST"]),
     ]
-    return LocalBoundary(app, token)
+    return LocalBoundary(app, token, store)

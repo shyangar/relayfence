@@ -9,6 +9,7 @@ from pathlib import Path
 
 from . import __version__
 from .client import RelayFenceClient
+from .errors import CoordinationError
 from .store import Store
 
 
@@ -81,7 +82,7 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init", help="Create a local ledger and access token (never overwrites)")
     init.add_argument("--directory", type=Path, default=Path(".relayfence"))
-    serve = sub.add_parser("serve", help="Serve MCP, HTTP and the read-only console on loopback")
+    serve = sub.add_parser("serve", help="Serve MCP, HTTP and the coordination console on loopback")
     serve.add_argument("--directory", type=Path, default=Path(".relayfence"))
     serve.add_argument("--host", choices=["127.0.0.1", "::1"], default="127.0.0.1")
     serve.add_argument("--port", type=int, default=7433)
@@ -104,6 +105,21 @@ def main(argv=None) -> int:
     call.add_argument("payload")
     call.add_argument("--url", default="http://127.0.0.1:7433")
     call.add_argument("--token-file", type=Path, default=Path(".relayfence/access.token"))
+    worker = sub.add_parser(
+        "worker", help="Run one assigned task using an explicit local command adapter"
+    )
+    worker.add_argument("--config", type=Path, required=True)
+    worker.add_argument("--task", required=True)
+    worker.add_argument(
+        "--run-directory",
+        type=Path,
+        required=True,
+        help="New private directory for recovery records",
+    )
+    worker.add_argument("--url", default="http://127.0.0.1:7433")
+    worker.add_argument(
+        "--token-file", type=Path, required=True, help="Instance credential, not the admin token"
+    )
     backup = sub.add_parser(
         "backup", help="Create an online consistent backup; destination must be new"
     )
@@ -142,6 +158,12 @@ def main(argv=None) -> int:
                 make_mcp(client.call_raw).run(transport="stdio")
         elif args.command == "config":
             print(connector_config(args.client, args.url, args.token_file))
+        elif args.command == "worker":
+            from .worker import run_task
+
+            with RelayFenceClient(args.url, read_token(args.token_file)) as client:
+                result = run_task(client, args.config, args.task, args.run_directory)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
         elif args.command == "call":
             raw = (
                 sys.stdin.read()
@@ -165,6 +187,9 @@ def main(argv=None) -> int:
         return 0
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"relayfence: {exc}", file=sys.stderr)
+        return 1
+    except CoordinationError as exc:
+        print(f"relayfence: {exc.code}: {exc.message}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         return 130

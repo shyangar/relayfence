@@ -36,6 +36,7 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest --cov=relayfence --cov-fail-under=90 --cov-report=term-missing --cov-report=xml
+      - run: uv run python examples/role_models.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -55,7 +56,7 @@ jobs:
           enable-cache: true
       - run: uv sync --locked
       - run: uv build
-      - run: uv run python scripts/smoke_wheel.py dist/relayfence-0.1.0-py3-none-any.whl
+      - run: uv run python scripts/smoke_wheel.py dist/relayfence-0.2.0-py3-none-any.whl
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: distribution

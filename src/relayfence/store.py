@@ -15,7 +15,9 @@ from importlib.resources import files
 from pathlib import Path
 
 from .errors import CoordinationError
+from .identity import ADMIN, Principal
 from .models import Mutation, Request
+from .registry import Registry
 
 MAX_PAYLOAD_BYTES = 131_072
 MAX_GRAPH_NODES = 256
@@ -31,19 +33,34 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-class Store:
+class Store(Registry):
+    encode = staticmethod(encode)
+    digest = staticmethod(digest)
+
     def __init__(self, path: str | Path, clock: Callable[[], float] = time.time):
         self.path = Path(path).resolve()
         self.clock = clock
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:
             db.execute("PRAGMA journal_mode=WAL")
-            version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
-                raise RuntimeError(f"Unsupported database schema {version}; expected 1")
-            if version == 0:
-                schema = files("relayfence").joinpath("schema.sql").read_text(encoding="utf-8")
-                db.executescript("BEGIN IMMEDIATE;\n" + schema + "\nCOMMIT;")
+            # Check the version under the write lock; concurrent starters cannot migrate twice.
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                version = db.execute("PRAGMA user_version").fetchone()[0]
+                if version not in (0, 1, 2):
+                    raise RuntimeError(f"Unsupported database schema {version}; expected 2")
+                scripts = (["schema.sql"] if version == 0 else []) + (
+                    ["migration_2.sql"] if version < 2 else []
+                )
+                for name in scripts:
+                    sql = files("relayfence").joinpath(name).read_text(encoding="utf-8")
+                    for statement in sql.split(";"):
+                        if statement.strip():
+                            db.execute(statement)
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
 
     @contextmanager
     def connection(self):
@@ -56,8 +73,17 @@ class Store:
         finally:
             db.close()
 
-    def execute(self, operation: str, request: Request) -> dict:
-        raw = encode({"operation": operation, "request": request.model_dump(mode="json")})
+    def execute(self, operation: str, request: Request, principal: Principal = ADMIN) -> dict:
+        payload = request.model_dump(mode="json")
+        # Preserve v0.1 receipt hashes when the newly optional fields are absent.
+        for field in {
+            "task_create": ["role_id"],
+            "task_claim": ["selection"],
+            "task_complete": ["reported_model"],
+        }.get(operation, []):
+            if payload.get(field) is None:
+                payload.pop(field, None)
+        raw = encode({"operation": operation, "request": payload})
         if len(raw.encode("utf-8")) > MAX_PAYLOAD_BYTES:
             raise CoordinationError("payload_too_large", "Request exceeds 128 KiB", status=413)
         mutation = isinstance(request, Mutation)
@@ -65,6 +91,7 @@ class Store:
             try:
                 db.execute("BEGIN IMMEDIATE" if mutation else "BEGIN")
                 now = self.clock()  # Time is sampled after acquiring the write lock.
+                self._authorize(db, operation, request, principal)
                 if mutation:
                     receipt = db.execute(
                         "SELECT digest,response FROM receipts WHERE project=? AND actor=? AND request_id=?",
@@ -272,9 +299,13 @@ class Store:
             "outputs": outputs,
             "result_freshness": freshness,
             "updated_at": row["updated_at"],
+            "role_id": row["role_id"],
+            "execution": json.loads(row["execution"]) if row["execution"] else None,
         }
 
     def _task_create(self, db, r, now):
+        if r.role_id:
+            self._registry_row(db, "roles", r.project, r.role_id)
         if db.execute(
             "SELECT 1 FROM tasks WHERE project=? AND task_id=?", (r.project, r.task_id)
         ).fetchone():
@@ -282,8 +313,8 @@ class Store:
                 "already_exists", "Task ID already exists", {"task_id": r.task_id}
             )
         db.execute(
-            "INSERT INTO tasks(project,task_id,title,description,inputs,status,created_at,updated_at) VALUES (?,?,?,?,?,'ready',?,?)",
-            (r.project, r.task_id, r.title, r.description, encode(r.inputs), now, now),
+            "INSERT INTO tasks(project,task_id,title,description,inputs,status,created_at,updated_at,role_id) VALUES (?,?,?,?,?,'ready',?,?,?)",
+            (r.project, r.task_id, r.title, r.description, encode(r.inputs), now, now, r.role_id),
         )
         self._event(db, r, now, "task.created", r.task_id, {"inputs": r.inputs})
         return self._task_get(db, r, now)
@@ -313,6 +344,7 @@ class Store:
 
     def _task_claim(self, db, r, now):
         row = self._task_row(db, r.project, r.task_id)
+        execution = self._claim_execution(db, r, row)
         if row["status"] == "done":
             raise CoordinationError(
                 "task_done", "Reopen the completed task before claiming it again"
@@ -333,7 +365,7 @@ class Store:
         token = secrets.token_urlsafe(32)
         fence = row["fence"] + 1
         db.execute(
-            "UPDATE tasks SET status='running',revision=revision+1,fence=?,owner=?,lease_hash=?,expires_at=?,snapshot=?,updated_at=? WHERE project=? AND task_id=?",
+            "UPDATE tasks SET status='running',revision=revision+1,fence=?,owner=?,lease_hash=?,expires_at=?,snapshot=?,updated_at=?,execution=? WHERE project=? AND task_id=?",
             (
                 fence,
                 r.actor,
@@ -341,6 +373,7 @@ class Store:
                 now + r.lease_seconds,
                 encode(refs),
                 now,
+                encode(execution) if execution else None,
                 r.project,
                 r.task_id,
             ),
@@ -351,7 +384,12 @@ class Store:
             now,
             "task.claimed",
             r.task_id,
-            {"fence": fence, "takeover": row["status"] == "running", "inputs": refs},
+            {
+                "fence": fence,
+                "takeover": row["status"] == "running",
+                "inputs": refs,
+                "execution": execution,
+            },
         )
         return {"task": self._task_get(db, r, now), "lease_token": token, "inputs": inputs}
 
@@ -397,6 +435,19 @@ class Store:
 
     def _task_complete(self, db, r, now):
         row = self._assert_lease(db, r, now)
+        execution = json.loads(row["execution"]) if row["execution"] else None
+        if r.reported_model:
+            if not execution:
+                raise CoordinationError(
+                    "role_required", "Model reports require a role execution snapshot"
+                )
+            requested = execution["requested"]["model"]
+            if requested is not None and requested != r.reported_model:
+                raise CoordinationError(
+                    "model_mismatch", "Reported model differs from the requested model"
+                )
+            execution["reported_model"] = r.reported_model
+            execution["model_evidence"] = "worker_reported"
         refs = json.loads(row["snapshot"])
         fresh, ancestors = self._freshness(db, r.project, refs)
         if not fresh["fresh"]:
@@ -422,11 +473,22 @@ class Store:
             self._write_item(db, r, now, output.key, "artifact", version, output.value, refs)
             published.append({"key": output.key, "version": version})
         db.execute(
-            "UPDATE tasks SET status='done',revision=revision+1,lease_hash=NULL,expires_at=NULL,outputs=?,updated_at=? WHERE project=? AND task_id=?",
-            (encode(published), now, r.project, r.task_id),
+            "UPDATE tasks SET status='done',revision=revision+1,lease_hash=NULL,expires_at=NULL,outputs=?,updated_at=?,execution=? WHERE project=? AND task_id=?",
+            (
+                encode(published),
+                now,
+                encode(execution) if execution else None,
+                r.project,
+                r.task_id,
+            ),
         )
         self._event(
-            db, r, now, "task.completed", r.task_id, {"fence": r.fence, "outputs": published}
+            db,
+            r,
+            now,
+            "task.completed",
+            r.task_id,
+            {"fence": r.fence, "outputs": published, "execution": execution},
         )
         return {
             "task": self._task_get(db, r, now),

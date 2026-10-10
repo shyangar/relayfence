@@ -88,7 +88,9 @@ Ask each client to list RelayFence tools, then call `items_list` with `{"request
 
 Next, create one task and ask both clients to claim its ID using distinct actor/request IDs. Exactly one live claim should succeed. Feed each client [the cooperation instructions](../examples/agent-instructions.md), choosing a project and actor name explicitly.
 
-The service exposes tools; it cannot force a model to call them, infer what files it read, or automatically wake another application. Event consumers poll `events_list`. There is no push subscription or scheduler in v0.1.
+The service exposes tools; it cannot force a model to call them, infer what files it read, or automatically wake another application. Event consumers poll `events_list`. There is no push subscription or scheduler in v0.2.
+
+For role-assigned work, register an instance, issue its own credential and generate its connector with `--token-file <instance.token>`. Its actor must match its instance ID. Set the required model in the external client before acknowledging the role selection in `task_claim`. The coordination MCP tools do not switch host models. See [roles and models](roles-and-models.md) for console setup and the separate local command adapter.
 
 ## Verification matrix
 
