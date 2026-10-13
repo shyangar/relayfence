@@ -68,6 +68,9 @@ def test_cli_dispatch_and_setup_paths(monkeypatch, tmp_path, capsys):
 
     class Dispatch:
         def __init__(self, path, url):
+            import threading
+
+            self.stop = threading.Event()
             seen.append((path, url))
 
         def run(self, once=False):

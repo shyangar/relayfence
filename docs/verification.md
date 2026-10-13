@@ -2,7 +2,18 @@
 
 Initial verification date: 2026-10-10. This file records actual checks and their scope, not a reliability SLA.
 
-## v0.3 local verification
+## Process and IPC verification (2026-10-13)
+
+- Windows / CPython 3.12.13: **180 passed, 1 platform-specific skip**, combined line/branch coverage **92.72%**. Ruff lint/format checks passed. The skipped case exercises POSIX `SIGTERM` cleanup and runs on the Linux/macOS CI jobs.
+- Real subprocess regressions cover a wrapper exiting before its children/grandchildren, command failure, execution timeout, local stop, lease loss, final stderr/event-log limits, and cancelling an outstanding HTTP renewal.
+- Windows tests forcibly kill the owner without running Python cleanup and verify the job's descendants stop. Startup-gate tests deliberately delay or fail job assignment and verify that the adapter cannot start early.
+- Transport tests exercise a real HTTP server that never replies or trickles response bytes, polling connection reuse/credential replacement, bounded parallel polling, independent failure backoff, invalid envelopes and bounded response storage.
+- A real service process, authenticated dispatcher and adapter tree verify normal publication and operator cancellation, including no publication after cancellation. The regression for an unknown completion outcome still replays the saved request exactly without a second artifact version.
+- The 0.3.0 wheel was rebuilt and installed into a fresh environment outside the checkout. All six MCP protocol demo checks and the two-role subprocess handoff passed there, including the packaged Windows bootstrap.
+
+See [process ownership and control traffic](process-lifecycle.md) for the limits of each operating system. This run used executable fixtures and local protocol services; the earlier native Codex acceptance below is historical evidence, not a new vendor-session run after these lifecycle changes.
+
+## v0.3 initial local verification
 
 - Windows / CPython 3.12.13: **150 pytest cases passed**, combined line/branch coverage **93.86%**; Ruff checks passed.
 

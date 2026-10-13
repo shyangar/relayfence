@@ -21,6 +21,8 @@ Create and edit tasks with priorities, due dates, roles and prerequisite tasks. 
 
 The local dispatcher starts ready work by priority, then due date. It waits for dependencies, serializes work in the same workspace and records failures for an explicit retry. The built-in Codex adapter uses your installed, authenticated CLI and selected model; no desktop chat is needed. Start with [the setup and task-management guide](docs/task-management.md).
 
+Lease requests run independently of local execution monitoring. Windows uses a gated Job Object to own descendants; Linux/macOS use process groups. Polling uses reusable asynchronous connections, per-identity deadlines and failure backoff. See [process ownership and control traffic](docs/process-lifecycle.md) for the exact behavior and platform limits.
+
 ![Task management console](docs/assets/task-management.png)
 
 ## What it enforces

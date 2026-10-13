@@ -1,17 +1,22 @@
 """Local polling dispatcher. Executable settings come only from a private config file."""
 
-import json
+import asyncio
+import logging
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .client import RelayFenceClient
+from .client import AsyncRelayFenceClient, RelayFenceClient
 from .errors import CoordinationError
 from .locking import WorkspaceBusy, local_lock
-from .worker import load_config, run_task, save_private
+from .worker import load_config, replace_private, run_task, save_private
+
+logger = logging.getLogger(__name__)
 
 
 class WorkerEntry(BaseModel):
@@ -26,6 +31,7 @@ class DispatcherConfig(BaseModel):
     run_directory: str = "runs"
     poll_seconds: float = Field(default=2, ge=0.2, le=10, allow_inf_nan=False)
     max_parallel: int = Field(default=2, ge=1, le=16, strict=True)
+    request_timeout_seconds: float = Field(default=3, ge=0.2, le=10, allow_inf_nan=False)
 
 
 class Dispatcher:
@@ -41,6 +47,10 @@ class Dispatcher:
         self.runner_id = "runner-" + uuid.uuid4().hex[:16]
         self.workers = []
         self.worker_health = {}
+        self._poll_loop = None
+        self._poll_clients = {}
+        self._retry_at = {}
+        self._failures = {}
         seen = set()
         for entry in self.config.workers:
             worker_path = (self.path.parent / entry.config).resolve()
@@ -75,13 +85,65 @@ class Dispatcher:
         return token
 
     def _client(self, worker):
-        return RelayFenceClient(self.url, self._token(worker["token_file"]))
+        return RelayFenceClient(
+            self.url, self._token(worker["token_file"]), timeout=self.config.request_timeout_seconds
+        )
+
+    def _async_client(self, worker):
+        return AsyncRelayFenceClient(
+            self.url,
+            "Bearer " + self._token(worker["token_file"]),
+            timeout=self.config.request_timeout_seconds,
+        )
 
     @staticmethod
-    def _list(client, method, key, project, **extra):
+    def _identity(worker):
+        return worker["config"].project + "/" + worker["config"].agent_id
+
+    @asynccontextmanager
+    async def _poll_client(self, worker):
+        # Each identity has at most one probe in flight. Execution uses a separate
+        # client, so polling/rotation cannot close a task's active connection pool.
+        identity = self._identity(worker)
+        token = self._token(worker["token_file"])
+        cached = self._poll_clients.get(identity)
+        if cached is not None and cached[0] != token:
+            await cached[1].__aexit__(None, None, None)
+            del self._poll_clients[identity]
+            cached = None
+        if cached is None:
+            context = self._async_client(worker)
+            client = await context.__aenter__()
+            cached = token, context, client
+            self._poll_clients[identity] = cached
+        yield cached[2]
+
+    def close(self):
+        """Stop probes before closing their clients; safe after run() or manual ticks."""
+        self.stop.set()
+        if self._poll_loop is not None:
+
+            async def close_clients():
+                try:
+                    for _, context, _ in self._poll_clients.values():
+                        await context.__aexit__(None, None, None)
+                finally:
+                    self._poll_clients.clear()
+
+            try:
+                self._poll_loop.run(close_clients())
+            finally:
+                self._poll_loop.close()
+                self._poll_loop = None
+
+    async def _list(self, client, method, key, project, **extra):
         result, after = [], ""
         while True:
-            page = client.call(method, project=project, after=after, limit=200, **extra)["data"]
+            if self.stop.is_set():
+                return []
+            page = (await client.call(method, project=project, after=after, limit=200, **extra))[
+                "data"
+            ]
             result.extend(page[key])
             after = page["next_cursor"]
             if not after:
@@ -122,18 +184,34 @@ class Dispatcher:
                     worker["rejected"].add((worker["task"]["task_id"], worker["task"]["revision"]))
                 worker["future"], worker["task"] = None, None
         busy = [w for w in self.workers if w["future"] is not None]
+        if self.stop.is_set():
+            return
+        if self._poll_loop is None:
+            self._poll_loop = asyncio.Runner()
+        # Poll identities concurrently, but select from the whole round to preserve
+        # global priority (particularly for roles sharing a workspace).
+        probes = self._poll_loop.run(self._poll_round(busy))
         candidates = []
-        for worker in self.workers:
-            identity = worker["config"].project + "/" + worker["config"].agent_id
+        for worker, probe in probes:
+            identity = self._identity(worker)
             try:
-                task = self._candidate(worker, busy)
+                if isinstance(probe, Exception):
+                    raise probe
+                task = probe
                 self.worker_health[identity] = {"ok": True}
+                self._failures.pop(identity, None)
+                self._retry_at.pop(identity, None)
                 if task:
                     candidates.append((task, worker))
             except (CoordinationError, OSError, ValueError) as exc:
+                failures = min(self._failures.get(identity, 0) + 1, 8)
+                self._failures[identity] = failures
+                delay = min(30, self.config.poll_seconds * 2 ** (failures - 1))
+                self._retry_at[identity] = time.monotonic() + delay
                 self.worker_health[identity] = {
                     "ok": False,
                     "code": exc.code if isinstance(exc, CoordinationError) else type(exc).__name__,
+                    "retry_after_seconds": delay,
                 }
         for task, worker in sorted(candidates, key=lambda pair: self._priority(pair[0])):
             if self.stop.is_set() or len(busy) >= self.config.max_parallel:
@@ -145,10 +223,32 @@ class Dispatcher:
             worker["future"] = pool.submit(self._execute, worker, task, directory)
             busy.append(worker)
 
-    def _candidate(self, worker, busy):
+    async def _poll_round(self, busy):
+        async def probe(worker):
+            try:
+                # Bound the whole probe, including all pages and slow trickling
+                # responses. No polling threads survive a cancelled request.
+                async with asyncio.timeout(self.config.request_timeout_seconds):
+                    return worker, await self._candidate(worker, busy)
+            except TimeoutError:
+                return worker, CoordinationError("poll_timeout", "Runner polling timed out")
+            except (CoordinationError, OSError, ValueError) as exc:
+                return worker, exc
+
+        return await asyncio.gather(
+            *(
+                probe(worker)
+                for worker in self.workers
+                if time.monotonic() >= self._retry_at.get(self._identity(worker), 0)
+            )
+        )
+
+    async def _candidate(self, worker, busy):
         config = worker["config"]
-        with self._client(worker) as client:
-            client.call(
+        async with self._poll_client(worker) as client:
+            if self.stop.is_set():
+                return None
+            await client.call(
                 "runner_heartbeat",
                 project=config.project,
                 actor=config.agent_id,
@@ -160,9 +260,9 @@ class Dispatcher:
                 return None
             if any(w["cwd"] == worker["cwd"] for w in busy):
                 return None
-            roles = self._list(client, "roles_list", "roles", config.project)
+            roles = await self._list(client, "roles_list", "roles", config.project)
             assigned = {role["role_id"] for role in roles if role["agent_id"] == config.agent_id}
-            tasks = self._list(client, "tasks_list", "tasks", config.project, status="ready")
+            tasks = await self._list(client, "tasks_list", "tasks", config.project, status="ready")
             tasks = [
                 task
                 for task in tasks
@@ -188,28 +288,22 @@ class Dispatcher:
                     while not self.stop.is_set():
                         try:
                             self.tick(pool)
-                            (self.directory / "health.json").write_text(
-                                json.dumps(
-                                    {
-                                        "ok": all(h["ok"] for h in self.worker_health.values()),
-                                        "workers": self.worker_health,
-                                    }
-                                ),
-                                encoding="utf-8",
-                            )
+                            health = {
+                                "ok": all(h["ok"] for h in self.worker_health.values()),
+                                "workers": self.worker_health,
+                            }
                         except (CoordinationError, OSError) as exc:
                             # Keep private, bounded health state. Never log request bodies or tokens.
-                            (self.directory / "health.json").write_text(
-                                json.dumps(
-                                    {
-                                        "ok": False,
-                                        "code": exc.code
-                                        if isinstance(exc, CoordinationError)
-                                        else type(exc).__name__,
-                                    }
-                                ),
-                                encoding="utf-8",
-                            )
+                            health = {
+                                "ok": False,
+                                "code": exc.code
+                                if isinstance(exc, CoordinationError)
+                                else type(exc).__name__,
+                            }
+                        try:
+                            replace_private(self.directory / "health.json", health)
+                        except OSError:
+                            logger.warning("Unable to replace dispatcher health snapshot")
                         if once:
                             for worker in self.workers:
                                 if worker["future"]:
@@ -217,4 +311,4 @@ class Dispatcher:
                             return
                         self.stop.wait(self.config.poll_seconds)
                 finally:
-                    self.stop.set()
+                    self.close()

@@ -1,8 +1,7 @@
 """Explicit local command adapter. The HTTP service never executes stored commands."""
 
+import asyncio
 import os
-import signal
-import subprocess
 import sys
 import time
 import uuid
@@ -15,6 +14,7 @@ from .client import RelayFenceClient
 from .errors import CoordinationError
 from .locking import local_lock
 from .models import ModelId, Name, Output
+from .processes import managed_process
 from .store import MAX_PAYLOAD_BYTES, encode
 
 
@@ -29,6 +29,7 @@ class WorkerConfig(BaseModel):
     cwd: str = "."
     timeout_seconds: int = Field(default=600, ge=1, le=86400, strict=True)
     lease_seconds: int = Field(default=120, ge=60, le=3600, strict=True)
+    heartbeat_timeout_seconds: float = Field(default=5, ge=0.2, le=30, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def validate_adapter(self):
@@ -123,82 +124,94 @@ def save_private(path, value):
         os.fsync(stream.fileno())
 
 
-def stop_process(process):
-    if process.poll() is not None:
-        return
-    if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            timeout=10,
-            check=False,
-        )
-    else:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass  # It exited between poll() and killpg().
-    if process.poll() is None:
-        process.kill()
-    process.wait(timeout=10)
+def replace_private(path, value):
+    """Publish a complete snapshot; readers see the old or the new JSON document."""
+    pending = path.with_name("." + path.name + "-" + uuid.uuid4().hex + ".tmp")
+    try:
+        save_private(pending, value)
+        os.replace(pending, path)
+    finally:
+        pending.unlink(missing_ok=True)
 
 
-def execute_command(command, cwd, envelope, directory, timeout, heartbeat, interval, stop=None):
+def _check_output(directory, stdout, stderr):
+    events = directory / "codex-events.jsonl"
+    if (
+        os.fstat(stdout.fileno()).st_size > MAX_PAYLOAD_BYTES
+        or os.fstat(stderr.fileno()).st_size > 1_048_576
+        or (events.exists() and events.stat().st_size > 8_388_608)
+    ):
+        raise RuntimeError("Command output exceeded its size limit")
+
+
+async def execute_command(
+    command,
+    cwd,
+    envelope,
+    directory,
+    timeout,
+    heartbeat,
+    interval,
+    stop=None,
+    heartbeat_timeout=5,
+):
+    """Monitor execution independently of asynchronous, cancellable lease renewal."""
     if stop is not None and stop.is_set():
         raise RuntimeError("Runner stopped before execution")
     save_private(directory / "input.json", envelope)
     env = {k: v for k, v in os.environ.items() if k != "RELAYFENCE_TOKEN"}
     env["RELAYFENCE_RUN_DIRECTORY"] = str(directory)
     with (
-        (directory / "input.json").open("rb") as stdin,
         (directory / "stdout.json").open("xb") as stdout,
         (directory / "stderr.log").open("xb") as stderr,
     ):
         if os.name != "nt":
             os.chmod(directory / "stdout.json", 0o600)
             os.chmod(directory / "stderr.log", 0o600)
-        process = subprocess.Popen(
-            command,
-            cwd=cwd,
-            stdin=stdin,
-            stdout=stdout,
-            stderr=stderr,
-            env=env,
-            shell=False,
-            start_new_session=os.name != "nt",
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-        )
         deadline = time.monotonic() + timeout
-        next_heartbeat = time.monotonic() + interval
+
+        async def renew():
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    async with asyncio.timeout(heartbeat_timeout):
+                        await heartbeat()
+                except TimeoutError as exc:
+                    raise CoordinationError(
+                        "heartbeat_timeout", "Lease heartbeat timed out; execution stopped"
+                    ) from exc
+
+        renewal = asyncio.create_task(renew(), name="relayfence-lease")
         try:
-            while process.poll() is None:
-                if stop is not None and stop.is_set():
-                    raise RuntimeError("Runner stopped before completion")
-                if time.monotonic() >= deadline:
-                    raise RuntimeError("Command timed out; inspect the private run directory")
-                if (
-                    os.fstat(stdout.fileno()).st_size > MAX_PAYLOAD_BYTES
-                    or os.fstat(stderr.fileno()).st_size > 1_048_576
-                    or (
-                        (directory / "codex-events.jsonl").exists()
-                        and (directory / "codex-events.jsonl").stat().st_size > 8_388_608
+            with managed_process(
+                command,
+                input_path=directory / "input.json",
+                cwd=cwd,
+                env=env,
+                stdout=stdout,
+                stderr=stderr,
+            ) as process:
+                while True:
+                    if stop is not None and stop.is_set():
+                        raise RuntimeError("Runner stopped before completion")
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("Command timed out; inspect the private run directory")
+                    if renewal.done():
+                        renewal.result()  # Loss of lease must win over an adapter's late result.
+                    _check_output(directory, stdout, stderr)
+                    if process.poll() is not None:
+                        break
+                    await asyncio.sleep(0.05)
+                if process.returncode:
+                    raise RuntimeError(
+                        f"Command exited with code {process.returncode}; inspect stderr.log"
                     )
-                ):
-                    raise RuntimeError("Command output exceeded its size limit")
-                if time.monotonic() >= next_heartbeat:
-                    heartbeat()
-                    next_heartbeat = time.monotonic() + interval
-                time.sleep(0.05)
-            if process.returncode:
-                raise RuntimeError(
-                    f"Command exited with code {process.returncode}; inspect stderr.log"
-                )
+            # Descendants are stopped before inspecting final logs or releasing the
+            # workspace lock. Include stderr/events written just before adapter exit.
+            _check_output(directory, stdout, stderr)
         finally:
-            stop_process(process)
-    if (directory / "stdout.json").stat().st_size > MAX_PAYLOAD_BYTES:
-        raise RuntimeError("Command result exceeds 128 KiB")
+            renewal.cancel()
+            await asyncio.gather(renewal, return_exceptions=True)
     try:
         return WorkerResult.model_validate_json((directory / "stdout.json").read_bytes())
     except ValueError as exc:
@@ -262,22 +275,34 @@ def _run_task(client, config, cwd, task_id, directory, stop):
         "selection": execution["requested"],
     }
 
-    def heartbeat():
-        client.call("task_heartbeat", **mutation(**lease, lease_seconds=config.lease_seconds))
+    async def execute(command):
+        # Control traffic has its own pool and overall deadline. Cancelling it must
+        # never leave a background thread renewing a lease after execution ends.
+        async with client.async_peer(timeout=config.heartbeat_timeout_seconds) as lease_client:
+
+            async def heartbeat():
+                await lease_client.call(
+                    "task_heartbeat", **mutation(**lease, lease_seconds=config.lease_seconds)
+                )
+
+            return await execute_command(
+                command,
+                cwd,
+                envelope,
+                directory,
+                config.timeout_seconds,
+                heartbeat,
+                min(3, config.lease_seconds / 3),
+                stop,
+                config.heartbeat_timeout_seconds,
+            )
 
     completion_saved = False
     try:
         command = adapter_command(config, execution["requested"])
-        result = execute_command(
-            command,
-            cwd,
-            envelope,
-            directory,
-            config.timeout_seconds,
-            heartbeat,
-            min(3, config.lease_seconds / 3),
-            stop,
-        )
+        result = asyncio.run(execute(command))
+        if stop is not None and stop.is_set():
+            raise RuntimeError("Runner stopped before publication")
         if result.error:
             raise CoordinationError(result.error.code, result.error.message)
         request = mutation(**lease, **result.model_dump(mode="json", exclude={"error"}))

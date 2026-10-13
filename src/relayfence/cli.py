@@ -210,8 +210,11 @@ def main(argv=None) -> int:
                 )
         elif args.command == "dispatch":
             from .dispatcher import Dispatcher
+            from .processes import stop_on_signal
 
-            Dispatcher(args.config, args.url).run(once=args.once)
+            dispatcher = Dispatcher(args.config, args.url)
+            with stop_on_signal(dispatcher.stop):
+                dispatcher.run(once=args.once)
         elif args.command == "setup-codex":
             from .setup_worker import setup_codex
 
@@ -236,10 +239,17 @@ def main(argv=None) -> int:
         elif args.command == "config":
             print(connector_config(args.client, args.url, args.token_file))
         elif args.command == "worker":
+            import threading
+
+            from .processes import stop_on_signal
             from .worker import run_task
 
-            with RelayFenceClient(args.url, read_token(args.token_file)) as client:
-                result = run_task(client, args.config, args.task, args.run_directory)
+            stop = threading.Event()
+            with (
+                stop_on_signal(stop),
+                RelayFenceClient(args.url, read_token(args.token_file)) as client,
+            ):
+                result = run_task(client, args.config, args.task, args.run_directory, stop)
             print(json.dumps(result, indent=2, ensure_ascii=False))
         elif args.command == "call":
             raw = (

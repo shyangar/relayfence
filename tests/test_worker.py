@@ -1,8 +1,11 @@
+import asyncio
 import json
 import os
 import sys
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from test_registry import SELECTION, bind, register
@@ -23,6 +26,13 @@ class LocalClient:
             error = result["error"]
             raise CoordinationError(error["code"], error["message"], error["details"], status)
         return result
+
+    @asynccontextmanager
+    async def async_peer(self, timeout):
+        async def call(operation, **payload):
+            return self.call(operation, **payload)
+
+        yield SimpleNamespace(call=call)
 
 
 @pytest.fixture
@@ -129,20 +139,22 @@ def test_command_heartbeat_and_loss_stops_process(tmp_path):
     directory.mkdir()
     calls = []
 
-    def heartbeat():
+    async def heartbeat():
         calls.append(1)
         raise CoordinationError("lease_lost", "Stop")
 
     start = time.monotonic()
     with pytest.raises(CoordinationError, match="Stop"):
-        execute_command(
-            [sys.executable, "-c", "import time;time.sleep(10)"],
-            tmp_path,
-            {},
-            directory,
-            20,
-            heartbeat,
-            0.1,
+        asyncio.run(
+            execute_command(
+                [sys.executable, "-c", "import time;time.sleep(10)"],
+                tmp_path,
+                {},
+                directory,
+                20,
+                heartbeat,
+                0.1,
+            )
         )
     assert calls == [1] and time.monotonic() - start < 5
 

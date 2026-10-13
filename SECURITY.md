@@ -10,4 +10,4 @@ The API does not execute stored content, fetch URLs or open caller-specified fil
 
 Report a suspected vulnerability through [GitHub private vulnerability reporting](https://github.com/shyangar/relayfence/security/advisories/new) if available. If it is unavailable, open a minimal issue requesting a private contact channel without including exploit details or credentials. Never include access tokens, lease tokens or a real ledger database in a public report.
 
-The current 0.2 series receives fixes as maintainer capacity permits; there is no response-time SLA or external security audit claim.
+The current 0.3 series receives fixes as maintainer capacity permits; there is no response-time SLA or external security audit claim.
