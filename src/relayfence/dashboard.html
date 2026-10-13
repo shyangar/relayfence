@@ -29,7 +29,9 @@
           sans-serif;
       }
       button,
-      input {
+      input,
+      select,
+      textarea {
         font: inherit;
       }
       button {
@@ -107,7 +109,9 @@
         font-size: 12px;
         font-weight: 650;
       }
-      input {
+      input,
+      select,
+      textarea {
         display: block;
         margin-top: 6px;
         padding: 10px 12px;
@@ -117,6 +121,91 @@
         background: #fff;
         width: 100%;
         outline-offset: 3px;
+      }
+      select,
+      textarea {
+        font: inherit;
+        min-width: 0;
+      }
+      textarea {
+        min-height: 84px;
+        resize: vertical;
+      }
+      .setup {
+        margin: 24px 0;
+      }
+      .setup summary {
+        padding: 16px 20px;
+        cursor: pointer;
+        font-weight: 650;
+      }
+      .setup-body {
+        padding: 20px;
+      }
+      .setup-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 24px;
+      }
+      .editor {
+        display: grid;
+        gap: 12px;
+        align-content: start;
+        min-width: 0;
+      }
+      .editor .pair {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+      .editor fieldset {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        min-width: 0;
+      }
+      .model-option {
+        display: grid;
+        gap: 8px;
+        margin-bottom: 12px;
+        padding: 12px;
+        background: var(--paper);
+        border-radius: 6px;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+      .binding {
+        padding: 14px 0;
+        border-bottom: 1px solid var(--line);
+        overflow-wrap: anywhere;
+      }
+      .binding button {
+        font-size: 12px;
+        padding: 5px 10px;
+        margin: 6px 6px 0 0;
+      }
+      #configuration-status {
+        min-height: 24px;
+        margin: 12px 0;
+        overflow-wrap: anywhere;
+      }
+      .secret-result {
+        padding: 14px;
+        border: 1px solid var(--line);
+        margin: 12px 0;
+        border-radius: 6px;
+      }
+      [hidden] {
+        display: none !important;
+      }
+      @media (max-width: 760px) {
+        .setup-grid,
+        .editor .pair {
+          grid-template-columns: 1fr;
+        }
       }
       .project {
         width: 180px;
@@ -315,6 +404,37 @@
         border-radius: 50%;
         margin-right: 8px;
       }
+      .task-toolbar {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      .task-toolbar label {
+        flex: 1;
+        min-width: 150px;
+      }
+      .task-actions {
+        margin-top: 12px;
+      }
+      .task-actions button {
+        font-size: 12px;
+        padding: 6px 10px;
+      }
+      .task-description {
+        margin-top: 10px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      #task-message {
+        padding: 10px 20px;
+        min-height: 40px;
+      }
+      #runners {
+        margin: 16px 0;
+        padding: 14px 20px;
+      }
       @media (max-width: 780px) {
         .columns {
           grid-template-columns: 1fr;
@@ -375,7 +495,9 @@
             See who owns each task and which results still match their inputs.
           </p>
         </div>
-        <p class="hint">Read-only console · refreshes every 5 seconds</p>
+        <p class="hint">
+          Roles, models &amp; shared work · refreshes every 5 seconds
+        </p>
       </div>
       <form class="connection" id="connect-form">
         <label class="project"
@@ -421,6 +543,31 @@
           <div class="panel-head">
             <h2>Tasks</h2>
             <span class="count" id="task-count">Awaiting connection</span>
+            <button type="button" id="create-task">New task</button>
+          </div>
+          <form id="task-filters" class="task-toolbar">
+            <label
+              >Search<input
+                id="task-search"
+                placeholder="Title, ID or description"
+                maxlength="240"
+            /></label>
+            <label
+              >Status<select id="task-status">
+                <option value="">All statuses</option>
+                <option value="ready">Ready</option>
+                <option value="blocked">Blocked</option>
+                <option value="running">Running</option>
+                <option value="paused">Paused</option>
+                <option value="failed">Failed</option>
+                <option value="done">Done</option>
+                <option value="cancelled">Cancelled</option>
+              </select></label
+            >
+            <button class="quiet" type="submit">Apply</button>
+          </form>
+          <div id="task-message" class="hint" role="status" aria-live="polite">
+            Create work here; configured background runners pick up ready tasks.
           </div>
           <div id="tasks" class="rows">
             <div class="empty">
@@ -448,6 +595,235 @@
           </div>
         </section>
       </div>
+      <section id="runners" class="panel" aria-label="Background runners">
+        Connect to see background runners.
+      </section>
+      <section id="task-detail" class="panel setup" hidden>
+        <div class="panel-head">
+          <h2 id="detail-title">Task details</h2>
+          <button class="quiet" id="close-detail">Close</button>
+        </div>
+        <div class="setup-body">
+          <div id="detail-content"></div>
+          <h3>Task history</h3>
+          <div id="detail-history"></div>
+          <button class="quiet" id="history-more" hidden>
+            Load more history
+          </button>
+        </div>
+      </section>
+      <details class="panel setup" id="setup" open>
+        <summary>Roles &amp; model selection</summary>
+        <div class="setup-body">
+          <p>
+            Register an instance, bind a role to its model, then assign work.
+            Management requires the admin token.
+          </p>
+          <div id="configuration-status" role="status" aria-live="polite">
+            Connect to configure this project.
+          </div>
+          <div class="setup-grid">
+            <div>
+              <h2>Role bindings</h2>
+              <div id="roles"><p>No roles loaded.</p></div>
+              <form id="role-form" class="editor">
+                <div class="pair">
+                  <label
+                    >Role ID<input
+                      id="role-id"
+                      required
+                      maxlength="128"
+                      placeholder="reviewer" /></label
+                  ><label
+                    >Display name<input
+                      id="role-label"
+                      required
+                      maxlength="160"
+                      placeholder="Code reviewer"
+                  /></label>
+                </div>
+                <label
+                  >Agent instance<select id="role-agent" required></select
+                ></label>
+                <label>Model<select id="role-model"></select></label>
+                <p class="hint" id="model-hint"></p>
+                <div id="role-parameters" class="editor"></div>
+                <label
+                  >Instructions<textarea
+                    id="role-instructions"
+                    maxlength="8000"
+                    placeholder="Review correctness, tests and migration risks."
+                  ></textarea>
+                </label>
+                <label
+                  >Deliverables · one per line<textarea
+                    id="role-deliverables"
+                    placeholder="Review verdict&#10;Findings with file references"
+                  ></textarea>
+                </label>
+                <label
+                  >Required capabilities · comma separated<input
+                    id="role-capabilities"
+                    placeholder="read-code, run-tests"
+                /></label>
+                <div class="actions">
+                  <button type="submit" id="save-role">Save role</button
+                  ><button type="button" class="quiet" id="new-role">
+                    New role</button
+                  ><span class="hint" id="role-revision">New role</span>
+                </div>
+              </form>
+            </div>
+            <div>
+              <h2>Task editor</h2>
+              <form id="assignment-form" class="editor">
+                <p class="hint">
+                  Describe the work, choose a role and set its prerequisites.
+                </p>
+                <label
+                  >Task ID<input
+                    id="assignment-id"
+                    required
+                    maxlength="128"
+                    placeholder="review-login"
+                /></label>
+                <label id="assignment-title-label"
+                  >Title<input
+                    id="assignment-title"
+                    required
+                    maxlength="240"
+                    placeholder="Review the login change"
+                /></label>
+                <label id="assignment-inputs-label"
+                  >Shared input keys · comma separated<input
+                    id="assignment-inputs"
+                    placeholder="api/spec, build/result"
+                /></label>
+                <label>Role<select id="assignment-role"></select></label>
+                <label
+                  >Description<textarea
+                    id="assignment-description"
+                    maxlength="8000"
+                    placeholder="What should be delivered, and how will it be checked?"
+                  ></textarea>
+                </label>
+                <div class="pair">
+                  <label
+                    >Priority<select id="assignment-priority">
+                      <option value="0">Low</option>
+                      <option value="1" selected>Normal</option>
+                      <option value="2">High</option>
+                      <option value="3">Urgent</option>
+                    </select></label
+                  >
+                  <label
+                    >Due date<input id="assignment-due" type="datetime-local"
+                  /></label>
+                </div>
+                <label
+                  >Prerequisite task IDs · comma separated<input
+                    id="assignment-dependencies"
+                    placeholder="design-api, implement-api"
+                /></label>
+                <div class="actions">
+                  <button type="submit" id="save-assignment">Create task</button
+                  ><button type="button" id="new-assignment" class="quiet">
+                    New task
+                  </button>
+                </div>
+                <p class="hint">
+                  A live lease must be released before reassignment. Role edits
+                  apply to future claims; running tasks retain their snapshot.
+                </p>
+              </form>
+              <details class="setup" id="agents-editor">
+                <summary>Agent instances &amp; model catalogues</summary>
+                <div id="agents"></div>
+                <form id="agent-form" class="editor">
+                  <div class="pair">
+                    <label
+                      >Instance ID<input
+                        id="agent-id"
+                        required
+                        maxlength="128"
+                        placeholder="codex-reviewer" /></label
+                    ><label
+                      >Display name<input
+                        id="agent-label"
+                        required
+                        maxlength="160"
+                        placeholder="My review session"
+                    /></label>
+                  </div>
+                  <label
+                    >Agent software<input
+                      id="agent-runtime"
+                      required
+                      maxlength="128"
+                      placeholder="codex, zcode, dsh, or custom"
+                  /></label>
+                  <label
+                    >Connection mode<select id="agent-mode">
+                      <option value="external">External session / MCP</option>
+                      <option value="command">Local command adapter</option>
+                    </select></label
+                  >
+                  <label
+                    >Status<select id="agent-enabled">
+                      <option value="true">Enabled</option>
+                      <option value="false">
+                        Disabled · deny credential access
+                      </option>
+                    </select></label
+                  >
+                  <label
+                    >Capabilities · comma separated<input
+                      id="agent-capabilities"
+                      placeholder="read-code, run-tests"
+                  /></label>
+                  <fieldset>
+                    <legend>Available models</legend>
+                    <p class="hint">
+                      Enter model IDs your account and adapter support. This
+                      catalogue does not query a provider.
+                    </p>
+                    <div id="model-options"></div>
+                    <button type="button" class="quiet" id="add-model">
+                      Add model
+                    </button>
+                  </fieldset>
+                  <div class="actions">
+                    <button type="submit" id="save-agent">Save instance</button
+                    ><button type="button" class="quiet" id="new-agent">
+                      New instance</button
+                    ><span class="hint" id="agent-revision">New instance</span>
+                  </div>
+                </form>
+              </details>
+              <div id="credential-result" class="secret-result" hidden>
+                <p>
+                  Save this instance credential privately. Rotating again
+                  invalidates it.
+                </p>
+                <label
+                  >Instance credential<input
+                    id="issued-token"
+                    type="password"
+                    readonly
+                    autocomplete="off"
+                /></label>
+                <div class="actions">
+                  <button type="button" id="download-credential">
+                    Download .token file</button
+                  ><button type="button" id="clear-credential" class="quiet">
+                    Clear
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </details>
       <section class="panel timeline">
         <div class="panel-head">
           <h2>Activity</h2>
@@ -479,6 +855,10 @@
         taskNext = null,
         itemNext = null,
         generation = 0;
+      let taskQuery = "",
+        taskStatus = "",
+        selectedTask = null,
+        historyCursor = 0;
       const node = (tag, cls, text) => {
         const n = document.createElement(tag);
         n.className = cls || "";
@@ -520,7 +900,7 @@
                 task.result_freshness &&
                 !task.result_freshness.fresh
               ? "done · stale"
-              : task.status;
+              : task.display_status;
           top.append(
             node(
               "span",
@@ -545,6 +925,37 @@
                 task.fence,
             ),
           );
+          row.dataset.taskId = task.task_id;
+          row.append(
+            node(
+              "div",
+              "meta",
+              ["Low", "Normal", "High", "Urgent"][task.priority] +
+                " priority" +
+                (task.due_at
+                  ? " · Due " + new Date(task.due_at * 1000).toLocaleString()
+                  : ""),
+            ),
+          );
+          if (task.blockers.length)
+            row.append(
+              node(
+                "div",
+                "meta",
+                "Waiting: " +
+                  task.blockers
+                    .map((b) => b.key + " (" + b.reason + ")")
+                    .join(", "),
+              ),
+            );
+          if (task.failure)
+            row.append(
+              node(
+                "div",
+                "meta",
+                task.failure.code + ": " + task.failure.message,
+              ),
+            );
           if (task.owner)
             row.append(
               node(
@@ -562,23 +973,207 @@
             row.append(
               node("div", "meta", "Inputs: " + task.inputs.join(", ")),
             );
+          if (task.role_id)
+            row.append(node("div", "meta", "Role: " + task.role_id));
+          if (task.execution) {
+            const x = task.execution;
+            row.append(
+              node(
+                "div",
+                "meta",
+                "Last claim: " +
+                  x.agent.agent_id +
+                  " · requested " +
+                  (x.requested.model || "external session") +
+                  " · reported " +
+                  (x.reported_model || "unknown") +
+                  " · " +
+                  x.model_evidence,
+              ),
+            );
+            const detail = node("details");
+            detail.append(
+              node("summary", "", "Execution configuration"),
+              node("pre", "", JSON.stringify(x, null, 2)),
+            );
+            row.append(detail);
+          }
+          const actions = node("div", "actions task-actions");
+          const action = (label, callback) => {
+            const b = node("button", "quiet", label);
+            b.type = "button";
+            b.addEventListener("click", callback);
+            actions.append(b);
+          };
+          action("Details & history", () => showTask(task.task_id));
+          if (!["running", "done"].includes(task.status))
+            action("Edit / reassign", () => editAssignment(task));
+          if (["ready", "running"].includes(task.status))
+            action("Pause", () => controlTask(task, "pause"));
+          if (task.status === "paused")
+            action("Resume", () => controlTask(task, "resume"));
+          if (["ready", "running", "paused", "failed"].includes(task.status))
+            action("Cancel", () => controlTask(task, "cancel"));
+          if (
+            ["failed", "cancelled"].includes(task.status) ||
+            task.lease_expired
+          )
+            action("Retry", () => controlTask(task, "retry"));
+          if (task.status === "done")
+            action("Reopen", () =>
+              write(
+                "task_reopen",
+                { task_id: task.task_id, expected_revision: task.revision },
+                () => {},
+              ),
+            );
+          row.append(actions);
           target.append(row);
         }
         if (!data.tasks.length)
           empty(
             "tasks",
-            "No tasks on this page. Create one from an agent or the API.",
+            "No matching tasks. Use New task to add work, or change the filters.",
           );
         el("task-count").textContent = data.tasks.length + " on this page";
         el("live-count").textContent = data.tasks.filter(
           (t) => t.status === "running" && !t.lease_expired,
         ).length;
         el("ready-count").textContent = data.tasks.filter(
-          (t) => t.status === "ready" || t.lease_expired,
+          (t) => t.display_status === "ready",
         ).length;
         taskNext = data.next_cursor;
         el("tasks-next").disabled = !taskNext;
         el("tasks-first").disabled = !taskCursor;
+      }
+      async function controlTask(task, action) {
+        const current = generation;
+        try {
+          const latest = await call("task_get", { task_id: task.task_id });
+          if (current !== generation) return;
+          if (
+            latest.fence !== task.fence ||
+            latest.status !== task.status ||
+            (latest.status !== "running" && latest.revision !== task.revision)
+          ) {
+            throw new Error(
+              "Task changed. Refresh and review its current state before applying this action.",
+            );
+          }
+          await write(
+            "task_control",
+            {
+              task_id: latest.task_id,
+              expected_revision: latest.revision,
+              action,
+            },
+            () => {},
+          );
+        } catch (error) {
+          configurationStatus(error.message, true);
+        }
+      }
+      async function showTask(id) {
+        const current = generation;
+        selectedTask = id;
+        historyCursor = 0;
+        el("detail-history").replaceChildren();
+        try {
+          const task = await call("task_get", { task_id: id });
+          if (current !== generation || selectedTask !== id) return;
+          el("detail-title").textContent = task.title;
+          el("task-detail").hidden = false;
+          const content = el("detail-content");
+          content.replaceChildren(
+            node(
+              "p",
+              "task-description",
+              task.description || "No description.",
+            ),
+            node(
+              "p",
+              "meta",
+              "Prerequisites: " + (task.depends_on.join(", ") || "None"),
+            ),
+            node("pre", "", JSON.stringify(task, null, 2)),
+          );
+          for (const output of task.outputs) {
+            const artifact = await call("item_get", {
+              key: output.key,
+              version: output.version,
+            });
+            if (current !== generation || selectedTask !== id) return;
+            content.append(
+              node("h3", "", output.key + " @" + output.version),
+              node("pre", "", JSON.stringify(artifact.value, null, 2)),
+            );
+          }
+          await loadHistory();
+          el("task-detail").scrollIntoView({
+            behavior: "smooth",
+            block: "start",
+          });
+        } catch (error) {
+          el("task-message").textContent = error.message;
+        }
+      }
+      async function loadHistory() {
+        const id = selectedTask,
+          current = generation;
+        try {
+          const data = await call("events_list", {
+            subject: id,
+            after: historyCursor,
+            limit: 50,
+          });
+          if (current !== generation || id !== selectedTask) return;
+          for (const event of data.events)
+            el("detail-history").append(
+              node(
+                "div",
+                "binding",
+                new Date(event.created_at * 1000).toLocaleString() +
+                  " · " +
+                  event.kind +
+                  " · " +
+                  event.actor +
+                  " · " +
+                  JSON.stringify(event.details),
+              ),
+            );
+          historyCursor = data.next_cursor;
+          el("history-more").hidden = !data.has_more;
+        } catch (error) {
+          el("task-message").textContent = error.message;
+        }
+      }
+      function renderRunners(data) {
+        const target = el("runners");
+        target.replaceChildren(node("h2", "", "Background runners"));
+        if (!data.runners.length)
+          target.append(
+            node(
+              "p",
+              "hint",
+              "No runner connected. Start RelayFence with --dispatcher and a local worker configuration.",
+            ),
+          );
+        for (const r of data.runners)
+          target.append(
+            node(
+              "div",
+              "binding",
+              r.agent_id +
+                " · " +
+                (r.online
+                  ? r.active_task
+                    ? "Working on " + r.active_task
+                    : "Online · waiting for ready work"
+                  : "Offline") +
+                " · Last seen " +
+                new Date(r.updated_at * 1000).toLocaleTimeString(),
+            ),
+          );
       }
       function renderItems(data) {
         const target = el("items");
@@ -675,14 +1270,31 @@
         busy = true;
         const current = generation;
         try {
-          const [tasks, items, activity] = await Promise.all([
-            call("tasks_list", { after: taskCursor, limit: 50 }),
+          const [
+            tasks,
+            items,
+            activity,
+            registryAgents,
+            registryRoles,
+            runners,
+          ] = await Promise.all([
+            call("tasks_list", {
+              after: taskCursor,
+              limit: 50,
+              query: taskQuery,
+              status: taskStatus || null,
+            }),
             call("items_list", { after: itemCursor, limit: 50 }),
             call("events_list", { after: eventCursor, limit: 200 }),
+            listAll("agents_list", "agents"),
+            listAll("roles_list", "roles"),
+            call("runners_list"),
           ]);
           if (current !== generation) return;
           renderTasks(tasks);
+          renderRunners(runners);
           renderItems(items);
+          renderRegistry(registryAgents, registryRoles);
           eventCursor = activity.next_cursor;
           events = events.concat(activity.events).slice(-50);
           renderEvents();
@@ -707,7 +1319,7 @@
       }
       el("connect-form").addEventListener("submit", async (event) => {
         event.preventDefault();
-        if (busy) return;
+        if (busy || writing) return;
         token = el("token").value.trim() || token;
         project = el("project").value.trim();
         el("token").value = "";
@@ -717,9 +1329,15 @@
         events = [];
         taskCursor = "";
         itemCursor = "";
+        selectedTask = null;
+        el("task-detail").hidden = true;
+        taskQuery = taskStatus = "";
+        el("task-search").value = el("task-status").value = "";
+        el("runners").textContent = "Loading background runners…";
         empty("tasks", "Loading project tasks…");
         empty("items", "Loading project state…");
         empty("events", "Loading project activity…");
+        resetConfiguration();
         for (const id of ["live-count", "ready-count", "stale-count"])
           el(id).textContent = "—";
         el("refresh").disabled = false;
@@ -741,6 +1359,456 @@
           refresh();
         });
       }
+      let agents = [],
+        roles = [],
+        editingAgent = null,
+        editingRole = null,
+        editingTask = null,
+        writing = false,
+        issuedAgent = "";
+      const pendingWrites = new Map();
+      const splitLines = (value) =>
+        value
+          .split(/\r?\n/)
+          .map((x) => x.trim())
+          .filter(Boolean);
+      const splitComma = (value) =>
+        value
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean);
+      function configurationStatus(message, error = false) {
+        el("configuration-status").textContent = message;
+        el("task-message").textContent = message;
+        el("configuration-status").style.color = error
+          ? "var(--red)"
+          : "var(--muted)";
+      }
+      async function listAll(operation, key) {
+        let after = "",
+          entries = [];
+        do {
+          const data = await call(operation, { after, limit: 200 });
+          entries.push(...data[key]);
+          after = data.next_cursor;
+        } while (after);
+        return entries;
+      }
+      async function write(operation, payload, onSuccess) {
+        if (writing) return;
+        if (!token)
+          return configurationStatus(
+            "Connect with the admin token first.",
+            true,
+          );
+        writing = true;
+        el("setup").inert = true;
+        const key = JSON.stringify([project, operation, payload]);
+        const request = pendingWrites.get(key) || {
+          ...payload,
+          actor: "console-admin",
+          request_id: crypto.randomUUID(),
+        };
+        pendingWrites.set(key, request);
+        try {
+          const data = await call(operation, request);
+          pendingWrites.delete(key);
+          onSuccess(data);
+          configurationStatus("Saved successfully.");
+          await refresh();
+        } catch (error) {
+          configurationStatus(
+            error.message +
+              " · For an unknown outcome, retry without changing the form in this tab. Revision conflicts require reloading the object with Edit.",
+            true,
+          );
+        } finally {
+          writing = false;
+          el("setup").inert = false;
+        }
+      }
+      function options(select, entries, current) {
+        select.replaceChildren();
+        for (const [value, label] of entries) {
+          const option = node("option", "", label);
+          option.value = value;
+          select.append(option);
+        }
+        if (entries.some(([value]) => value === current))
+          select.value = current;
+      }
+      function selectedParameters() {
+        return Object.fromEntries(
+          Array.from(el("role-parameters").querySelectorAll("select"))
+            .filter((x) => x.value)
+            .map((x) => [x.dataset.parameter, x.value]),
+        );
+      }
+      function renderModels(
+        model = el("role-model").value,
+        parameters = selectedParameters(),
+      ) {
+        const agent = agents.find((a) => a.agent_id === el("role-agent").value);
+        const entries =
+          !agent || agent.mode === "external"
+            ? [["", "Use external session settings"]]
+            : [];
+        for (const m of agent?.models || []) entries.push([m.id, m.id]);
+        if (model && !entries.some(([value]) => value === model))
+          entries.push([model, model + " (no longer in catalogue)"]);
+        options(el("role-model"), entries, model);
+        el("role-parameters").replaceChildren();
+        const chosen = agent?.models.find(
+          (m) => m.id === el("role-model").value,
+        );
+        const parameterNames = new Set([
+          ...Object.keys(chosen?.parameters || {}),
+          ...Object.keys(parameters),
+        ]);
+        for (const name of parameterNames) {
+          const values = chosen?.parameters?.[name] || [];
+          const label = node("label", "", name),
+            select = node("select");
+          select.dataset.parameter = name;
+          const allowed = [
+            ["", "Adapter default"],
+            ...values.map((v) => [v, v]),
+          ];
+          if (parameters[name] && !values.includes(parameters[name]))
+            allowed.push([
+              parameters[name],
+              parameters[name] + " (no longer supported)",
+            ]);
+          options(select, allowed, parameters[name]);
+          label.append(select);
+          el("role-parameters").append(label);
+        }
+        el("model-hint").textContent = !agent
+          ? "Register an instance first."
+          : agent.mode === "external"
+            ? "Configure this model in the external session before claiming. RelayFence cannot switch it through MCP. Reports are self-reported."
+            : "The local worker passes the selected model to your configured command. A worker process must be started separately.";
+      }
+      function renderRegistry(nextAgents, nextRoles) {
+        agents = nextAgents;
+        roles = nextRoles;
+        el("agents").replaceChildren();
+        for (const agent of agents) {
+          const row = node("div", "binding"),
+            edit = node("button", "quiet", "Edit"),
+            rotate = node("button", "quiet", "Issue / rotate credential");
+          row.append(
+            node("strong", "", agent.label),
+            node(
+              "div",
+              "meta",
+              agent.agent_id +
+                " · " +
+                agent.runtime +
+                " · " +
+                agent.mode +
+                (agent.enabled ? "" : " · disabled"),
+            ),
+          );
+          edit.addEventListener("click", () => editAgent(agent));
+          rotate.addEventListener("click", () =>
+            write(
+              "agent_token_rotate",
+              { agent_id: agent.agent_id, expected_revision: agent.revision },
+              (data) => {
+                issuedAgent = data.agent.agent_id;
+                el("issued-token").value = data.token;
+                el("credential-result").hidden = false;
+                if (editingAgent?.agent_id === agent.agent_id)
+                  editAgent(data.agent);
+              },
+            ),
+          );
+          row.append(edit, rotate);
+          el("agents").append(row);
+        }
+        el("roles").replaceChildren();
+        for (const role of roles) {
+          const row = node("div", "binding"),
+            edit = node("button", "quiet", "Edit");
+          row.append(
+            node("strong", "", role.label),
+            node(
+              "div",
+              "meta",
+              role.role_id +
+                " → " +
+                role.agent_id +
+                " → " +
+                (role.selection.model || "external session settings"),
+            ),
+          );
+          edit.addEventListener("click", () => editRole(role));
+          row.append(edit);
+          el("roles").append(row);
+        }
+        if (!roles.length)
+          el("roles").append(
+            node(
+              "p",
+              "hint",
+              "No roles yet. Register an instance, then save a role.",
+            ),
+          );
+        options(
+          el("role-agent"),
+          agents.map((a) => [
+            a.agent_id,
+            a.label + " · " + a.runtime + (a.enabled ? "" : " (disabled)"),
+          ]),
+          el("role-agent").value,
+        );
+        options(
+          el("assignment-role"),
+          [
+            ["", "Unassigned / legacy cooperation"],
+            ...roles.map((r) => [r.role_id, r.label + " → " + r.agent_id]),
+          ],
+          el("assignment-role").value,
+        );
+        renderModels();
+      }
+      function addModel(model = { id: "", parameters: {} }) {
+        const row = node("div", "model-option"),
+          label = node("label", "", "Model ID"),
+          id = node("input"),
+          parameterRows = node("div", "editor"),
+          addParameter = node("button", "quiet", "Add supported parameter"),
+          remove = node("button", "quiet", "Remove model");
+        id.dataset.modelId = "";
+        id.required = true;
+        id.value = model.id;
+        id.maxLength = 200;
+        label.append(id);
+        function parameter(name = "", values = []) {
+          const pair = node("div", "pair parameter-option"),
+            a = node("label", "", "Parameter name"),
+            b = node("label", "", "Allowed values · comma separated"),
+            key = node("input"),
+            choices = node("input"),
+            del = node("button", "quiet", "Remove parameter");
+          key.dataset.key = "";
+          key.value = name;
+          key.required = true;
+          key.placeholder = "reasoning_effort";
+          choices.dataset.values = "";
+          choices.value = values.join(", ");
+          choices.required = true;
+          choices.placeholder = "low, medium, high";
+          a.append(key);
+          b.append(choices);
+          pair.append(a, b, del);
+          del.type = "button";
+          del.addEventListener("click", () => pair.remove());
+          parameterRows.append(pair);
+        }
+        for (const [key, values] of Object.entries(model.parameters))
+          parameter(key, values);
+        addParameter.type = remove.type = "button";
+        addParameter.addEventListener("click", () => parameter());
+        remove.addEventListener("click", () => row.remove());
+        row.append(label, parameterRows, addParameter, remove);
+        el("model-options").append(row);
+      }
+      function editAgent(agent = null) {
+        editingAgent = agent;
+        el("agent-id").value = agent?.agent_id || "";
+        el("agent-id").readOnly = Boolean(agent);
+        el("agent-label").value = agent?.label || "";
+        el("agent-runtime").value = agent?.runtime || "";
+        el("agent-mode").value = agent?.mode || "external";
+        el("agent-enabled").value = String(agent?.enabled ?? true);
+        el("agent-capabilities").value = agent?.capabilities.join(", ") || "";
+        el("agent-revision").textContent = agent
+          ? "Revision " + agent.revision
+          : "New instance";
+        el("model-options").replaceChildren();
+        for (const m of agent?.models || []) addModel(m);
+        if (agent) el("agents-editor").open = true;
+      }
+      function editRole(role = null) {
+        editingRole = role;
+        el("role-id").value = role?.role_id || "";
+        el("role-id").readOnly = Boolean(role);
+        el("role-label").value = role?.label || "";
+        el("role-instructions").value = role?.instructions || "";
+        el("role-deliverables").value = role?.deliverables.join("\n") || "";
+        el("role-capabilities").value =
+          role?.required_capabilities.join(", ") || "";
+        el("role-revision").textContent = role
+          ? "Revision " + role.revision
+          : "New role";
+        if (role) el("role-agent").value = role.agent_id;
+        renderModels(
+          role?.selection.model || "",
+          role?.selection.parameters || {},
+        );
+      }
+      function editAssignment(task = null) {
+        editingTask = task;
+        el("assignment-id").value = task?.task_id || "";
+        el("assignment-id").readOnly = Boolean(task);
+        el("assignment-title").value = task?.title || "";
+        el("assignment-title").required = true;
+        el("assignment-title-label").hidden = el(
+          "assignment-inputs-label",
+        ).hidden = false;
+        el("assignment-inputs").value = task?.inputs.join(", ") || "";
+        el("assignment-description").value = task?.description || "";
+        el("assignment-priority").value = String(task?.priority ?? 1);
+        el("assignment-dependencies").value = task?.depends_on.join(", ") || "";
+        const due = task?.due_at ? new Date(task.due_at * 1000) : null;
+        el("assignment-due").value = due
+          ? new Date(due.getTime() - due.getTimezoneOffset() * 60000)
+              .toISOString()
+              .slice(0, 16)
+          : "";
+        el("assignment-role").value = task?.role_id || "";
+        el("save-assignment").textContent = task
+          ? "Save task · revision " + task.revision
+          : "Create task";
+        if (task) {
+          el("setup").open = true;
+          el("assignment-form").scrollIntoView({
+            behavior: "smooth",
+            block: "center",
+          });
+        }
+      }
+      function clearCredential() {
+        el("issued-token").value = "";
+        issuedAgent = "";
+        el("credential-result").hidden = true;
+      }
+      function resetConfiguration() {
+        agents = [];
+        roles = [];
+        pendingWrites.clear();
+        renderRegistry([], []);
+        editAgent();
+        editRole();
+        editAssignment();
+        clearCredential();
+        configurationStatus(
+          "Management requires the admin token. Model catalogues are configured by you.",
+        );
+      }
+      el("agent-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const models = Array.from(
+          el("model-options").querySelectorAll(".model-option"),
+        ).map((row) => ({
+          id: row.querySelector("[data-model-id]").value.trim(),
+          parameters: Object.fromEntries(
+            Array.from(row.querySelectorAll(".parameter-option")).map((p) => [
+              p.querySelector("[data-key]").value.trim(),
+              splitComma(p.querySelector("[data-values]").value),
+            ]),
+          ),
+        }));
+        write(
+          "agent_put",
+          {
+            agent_id: el("agent-id").value.trim(),
+            expected_revision: editingAgent?.revision || 0,
+            label: el("agent-label").value.trim(),
+            runtime: el("agent-runtime").value.trim(),
+            mode: el("agent-mode").value,
+            enabled: el("agent-enabled").value === "true",
+            capabilities: splitComma(el("agent-capabilities").value),
+            models,
+          },
+          editAgent,
+        );
+      });
+      el("role-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        write(
+          "role_put",
+          {
+            role_id: el("role-id").value.trim(),
+            expected_revision: editingRole?.revision || 0,
+            label: el("role-label").value.trim(),
+            instructions: el("role-instructions").value,
+            deliverables: splitLines(el("role-deliverables").value),
+            required_capabilities: splitComma(el("role-capabilities").value),
+            agent_id: el("role-agent").value,
+            selection: {
+              model: el("role-model").value || null,
+              parameters: selectedParameters(),
+            },
+          },
+          editRole,
+        );
+      });
+      el("assignment-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const payload = {
+          task_id: el("assignment-id").value.trim(),
+          role_id: el("assignment-role").value || null,
+          title: el("assignment-title").value.trim(),
+          inputs: splitComma(el("assignment-inputs").value),
+          description: el("assignment-description").value,
+          priority: Number(el("assignment-priority").value),
+          due_at: el("assignment-due").value
+            ? new Date(el("assignment-due").value).getTime() / 1000
+            : null,
+          depends_on: splitComma(el("assignment-dependencies").value),
+        };
+        if (editingTask) payload.expected_revision = editingTask.revision;
+        else {
+          payload.title = el("assignment-title").value.trim();
+          payload.inputs = splitComma(el("assignment-inputs").value);
+        }
+        write(editingTask ? "task_update" : "task_create", payload, () =>
+          editAssignment(),
+        );
+      });
+      el("role-agent").addEventListener("change", () => renderModels("", {}));
+      el("role-model").addEventListener("change", () =>
+        renderModels(el("role-model").value, {}),
+      );
+      el("new-agent").addEventListener("click", () => editAgent());
+      el("new-role").addEventListener("click", () => editRole());
+      el("new-assignment").addEventListener("click", () => editAssignment());
+      el("create-task").addEventListener("click", () => {
+        editAssignment();
+        el("setup").open = true;
+        el("assignment-form").scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+        });
+      });
+      el("task-filters").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (busy) return;
+        taskQuery = el("task-search").value.trim();
+        taskStatus = el("task-status").value;
+        taskCursor = "";
+        refresh();
+      });
+      el("close-detail").addEventListener("click", () => {
+        selectedTask = null;
+        el("task-detail").hidden = true;
+      });
+      el("history-more").addEventListener("click", loadHistory);
+      el("add-model").addEventListener("click", () => addModel());
+      el("clear-credential").addEventListener("click", clearCredential);
+      el("download-credential").addEventListener("click", () => {
+        const url = URL.createObjectURL(
+          new Blob([el("issued-token").value + "\n"], { type: "text/plain" }),
+        );
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = issuedAgent.replace(/[^a-zA-Z0-9_-]/g, "_") + ".token";
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      });
       setInterval(refresh, 5000);
     </script>
   </body>

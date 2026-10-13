@@ -65,6 +65,19 @@ Source: [official ZCode MCP services documentation](https://zcode.z.ai/en/docs/m
 
 Add the generated YAML entry to the MCP client plugin entries in the profile you run. The entry uses the official `@deepseek-ai/dsh-mcp-client` package and `transport: stdio`.
 
+When adding a new plugin to an existing `cordis.patch.yml`, wrap the generated entry in an `insert` operation (verified with desktop 0.2.0-rc.2):
+
+~~~yaml
+- insert:
+    - id: mcp-relayfence
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: relayfence
+        transport: stdio
+        command: /absolute/path/to/python
+        args: ['-m', relayfence, bridge, '--url', 'http://127.0.0.1:7433', '--token-file', '/private/instance.token']
+~~~
+
 For direct HTTP, the equivalent entry is:
 
 ~~~yaml
@@ -88,7 +101,9 @@ Ask each client to list RelayFence tools, then call `items_list` with `{"request
 
 Next, create one task and ask both clients to claim its ID using distinct actor/request IDs. Exactly one live claim should succeed. Feed each client [the cooperation instructions](../examples/agent-instructions.md), choosing a project and actor name explicitly.
 
-The service exposes tools; it cannot force a model to call them, infer what files it read, or automatically wake another application. Event consumers poll `events_list`. There is no push subscription or scheduler in v0.1.
+The service exposes tools; it cannot force a model to call them, infer what files it read, or automatically wake another application. Event consumers poll `events_list`. There is no push subscription. The optional v0.3 local dispatcher polls and executes configured command-mode agents; it does not wake existing desktop chats.
+
+For role-assigned work, register an instance, issue its own credential and generate its connector with `--token-file <instance.token>`. Its actor must match its instance ID. Set the required model in the external client before acknowledging the role selection in `task_claim`. The coordination MCP tools do not switch host models. See [roles and models](roles-and-models.md) for console setup and the separate local command adapter.
 
 ## Verification matrix
 
@@ -98,8 +113,8 @@ The service exposes tools; it cannot force a model to call them, infer what file
 | MCP Streamable HTTP, legacy initialization | Same server, official SDK `mode="legacy"`; discovery and calls tested |
 | MCP stdio bridge → HTTP ledger | Actual stdio subprocess plus an independent HTTP client; shared ownership conflict tested |
 | Python HTTP client | Authentication, structured errors, retry receipts and concurrency tested |
-| Codex | Generated TOML parsed and installed CLI options checked; **no live model session tested** |
-| ZCode | Configuration documented against official docs; **no installed client/model session tested** |
-| DSH | Configuration documented against official plugin docs; **no installed harness/model session tested** |
+| Codex | Generated TOML parsed and installed CLI options checked; live Codex CLI 0.130.0 with native MCP completed a specification task; desktop UI control was not tested |
+| ZCode | Workspace configuration checked in the installed application; no usable model session was available, so ZCode generation remains unverified |
+| DSH | DeepSeek Harness desktop 0.2.0-rc.2 read a Codex artifact and published 10 cases through MCP; wrong-role/model claims rejected; malformed model output recovered by reusing the live lease |
 
 Protocol compatibility is useful evidence, but it does not establish model behavior or vendor end-to-end certification. Submit a reproducible issue with client version, transport, redacted configuration and exact error to extend this matrix. Never attach access tokens or lease tokens.

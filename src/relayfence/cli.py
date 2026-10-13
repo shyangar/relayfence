@@ -9,6 +9,7 @@ from pathlib import Path
 
 from . import __version__
 from .client import RelayFenceClient
+from .errors import CoordinationError
 from .store import Store
 
 
@@ -81,11 +82,43 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init", help="Create a local ledger and access token (never overwrites)")
     init.add_argument("--directory", type=Path, default=Path(".relayfence"))
-    serve = sub.add_parser("serve", help="Serve MCP, HTTP and the read-only console on loopback")
+    serve = sub.add_parser("serve", help="Serve MCP, HTTP and the coordination console on loopback")
     serve.add_argument("--directory", type=Path, default=Path(".relayfence"))
     serve.add_argument("--host", choices=["127.0.0.1", "::1"], default="127.0.0.1")
     serve.add_argument("--port", type=int, default=7433)
     serve.add_argument("--token-file", type=Path)
+    serve.add_argument(
+        "--dispatcher",
+        type=Path,
+        help="Start local background workers from a private dispatcher config",
+    )
+    dispatch = sub.add_parser(
+        "dispatch", help="Continuously run ready tasks using configured local agents"
+    )
+    dispatch.add_argument("--config", type=Path, required=True)
+    dispatch.add_argument("--url", default="http://127.0.0.1:7433")
+    dispatch.add_argument(
+        "--once",
+        action="store_true",
+        help="Run one scheduling pass and wait for its selected tasks",
+    )
+    setup = sub.add_parser(
+        "setup-codex", help="Register a Codex worker, role and private dispatcher config"
+    )
+    setup.add_argument(
+        "--directory", type=Path, required=True, help="New private configuration directory"
+    )
+    setup.add_argument("--workspace", type=Path, required=True)
+    setup.add_argument("--model", required=True)
+    setup.add_argument("--agent", default="codex-worker")
+    setup.add_argument("--project", default="default")
+    setup.add_argument("--executable", default="codex")
+    setup.add_argument("--sandbox", choices=["read-only", "workspace-write"], default="read-only")
+    setup.add_argument(
+        "--effort", choices=["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+    )
+    setup.add_argument("--url", default="http://127.0.0.1:7433")
+    setup.add_argument("--token-file", type=Path, default=Path(".relayfence/access.token"))
     bridge = sub.add_parser(
         "bridge", help="Expose stdio MCP tools backed by an existing shared HTTP service"
     )
@@ -104,6 +137,21 @@ def main(argv=None) -> int:
     call.add_argument("payload")
     call.add_argument("--url", default="http://127.0.0.1:7433")
     call.add_argument("--token-file", type=Path, default=Path(".relayfence/access.token"))
+    worker = sub.add_parser(
+        "worker", help="Run one assigned task using an explicit local command adapter"
+    )
+    worker.add_argument("--config", type=Path, required=True)
+    worker.add_argument("--task", required=True)
+    worker.add_argument(
+        "--run-directory",
+        type=Path,
+        required=True,
+        help="New private directory for recovery records",
+    )
+    worker.add_argument("--url", default="http://127.0.0.1:7433")
+    worker.add_argument(
+        "--token-file", type=Path, required=True, help="Instance credential, not the admin token"
+    )
     backup = sub.add_parser(
         "backup", help="Create an online consistent backup; destination must be new"
     )
@@ -134,7 +182,55 @@ def main(argv=None) -> int:
             token = read_token(args.token_file or args.directory / "access.token")
             store = Store(args.directory / "ledger.sqlite3")
             app = create_app(store, token)
-            uvicorn.run(app, host=args.host, port=args.port, log_level="warning", access_log=False)
+            if args.dispatcher:
+                import threading
+
+                from .dispatcher import Dispatcher
+
+                url = (
+                    f"http://[::1]:{args.port}"
+                    if args.host == "::1"
+                    else f"http://{args.host}:{args.port}"
+                )
+                dispatcher = Dispatcher(args.dispatcher, url)
+                thread = threading.Thread(
+                    target=dispatcher.run, name="relayfence-dispatcher", daemon=True
+                )
+                thread.start()
+                try:
+                    uvicorn.run(
+                        app, host=args.host, port=args.port, log_level="warning", access_log=False
+                    )
+                finally:
+                    dispatcher.stop.set()
+                    thread.join(timeout=30)
+            else:
+                uvicorn.run(
+                    app, host=args.host, port=args.port, log_level="warning", access_log=False
+                )
+        elif args.command == "dispatch":
+            from .dispatcher import Dispatcher
+            from .processes import stop_on_signal
+
+            dispatcher = Dispatcher(args.config, args.url)
+            with stop_on_signal(dispatcher.stop):
+                dispatcher.run(once=args.once)
+        elif args.command == "setup-codex":
+            from .setup_worker import setup_codex
+
+            with RelayFenceClient(args.url, read_token(args.token_file)) as client:
+                result = setup_codex(
+                    client,
+                    args.directory,
+                    args.project,
+                    args.agent,
+                    args.model,
+                    args.workspace,
+                    args.executable,
+                    args.sandbox,
+                    args.effort,
+                )
+            print(json.dumps(result, indent=2, ensure_ascii=False))
         elif args.command == "bridge":
             from .mcp_server import make_mcp
 
@@ -142,6 +238,19 @@ def main(argv=None) -> int:
                 make_mcp(client.call_raw).run(transport="stdio")
         elif args.command == "config":
             print(connector_config(args.client, args.url, args.token_file))
+        elif args.command == "worker":
+            import threading
+
+            from .processes import stop_on_signal
+            from .worker import run_task
+
+            stop = threading.Event()
+            with (
+                stop_on_signal(stop),
+                RelayFenceClient(args.url, read_token(args.token_file)) as client,
+            ):
+                result = run_task(client, args.config, args.task, args.run_directory, stop)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
         elif args.command == "call":
             raw = (
                 sys.stdin.read()
@@ -165,6 +274,9 @@ def main(argv=None) -> int:
         return 0
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"relayfence: {exc}", file=sys.stderr)
+        return 1
+    except CoordinationError as exc:
+        print(f"relayfence: {exc.code}: {exc.message}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         return 130
