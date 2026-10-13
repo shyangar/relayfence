@@ -77,8 +77,20 @@ def managed_process(command, *, input_path, cwd, env, stdout, stderr):
                 job.close()
             elif process is not None:
                 # The leader may already have exited while descendants are alive.
+                # Reap it first: macOS can report EPERM for a group whose only
+                # remaining member is an unreaped zombie. Still signal the group
+                # after poll(), because live descendants can outlast that leader.
+                process.poll()
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except PermissionError:
+                        # Cover the leader exiting between poll() and killpg().
+                        # Preserve genuine permission failures, including those
+                        # from a surviving child with different credentials.
+                        if process.poll() is None:
+                            raise
+                        os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
         finally:

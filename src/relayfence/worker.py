@@ -206,8 +206,8 @@ async def execute_command(
                     raise RuntimeError(
                         f"Command exited with code {process.returncode}; inspect stderr.log"
                     )
-            # Descendants are stopped before inspecting final logs or releasing the
-            # workspace lock. Include stderr/events written just before adapter exit.
+            # Tree cleanup precedes final log checks and workspace-lock release.
+            # Include stderr/events written just before adapter exit.
             _check_output(directory, stdout, stderr)
         finally:
             renewal.cancel()

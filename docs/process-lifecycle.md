@@ -4,11 +4,11 @@ RelayFence keeps model execution separate from control traffic. A slow coordinat
 
 ## Process lifetime
 
-The worker owns the adapter until its process tree has been stopped and its final output has been checked. It keeps the workspace lock throughout that cleanup, then submits through the existing lease/fencing checks.
+The worker keeps ownership and the workspace lock while terminating the adapter's job/process group and checking its final output, then submits through the existing lease/fencing checks.
 
 - **Windows:** a private Job Object uses `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, without breakaway permissions. A small Python bootstrap waits on an anonymous pipe. The worker assigns the bootstrap to the job **before** allowing it to create the adapter. Assignment failure aborts execution. This avoids the race between creating a fast wrapper and assigning it after it has already spawned children. The bootstrap uses the base Python interpreter because a Windows virtual-environment redirector can itself spawn a child early.
 - Closing the Windows job terminates its remaining members even after the adapter exits. The worker waits for the job's active-process count to reach zero before releasing the workspace. The kernel also closes the job handle when the worker process crashes or is forcibly terminated.
-- **Linux/macOS:** the adapter starts in a new session/process group. Cleanup signals that group even when its leader has exited. `SIGTERM` for the standalone worker/dispatcher and Ctrl+C use normal cleanup. An uncatchable runner `SIGKILL` does not have the Windows job's owner-death guarantee.
+- **Linux/macOS:** the adapter starts in a new session/process group. Cleanup reaps an exited leader, signals the group even when that leader has exited, and waits for the direct child. Non-child descendants cannot be portably reaped by this worker. `SIGTERM` for the standalone worker/dispatcher and Ctrl+C use normal cleanup. An uncatchable runner `SIGKILL` does not have the Windows job's owner-death guarantee.
 
 These are lifecycle controls for trusted local adapters, not a sandbox. POSIX descendants that deliberately create a new session, programs launched through an unrelated service, remote actions, and changes already made to files are outside this cleanup guarantee. Windows sandbox implementations that use external services may also launch processes outside the job. Keep isolated worktrees and perform external acceptance checks.
 
@@ -24,7 +24,7 @@ The request is cancelled and its transport closed when execution ends. Local sto
 
 ## Dispatcher connections and recovery
 
-Each configured identity has one reusable asynchronous polling client. A polling round runs identities concurrently, then orders the available candidates by priority/deadline/creation time as before. Ordinary workspace locking and `max_parallel` still apply. Task execution has separate clients, so rotating or closing a polling connection does not close an active task's transport.
+Each configured identity has one reusable asynchronous polling client. Clients share a verified TLS context so repeatedly loading the same CA bundle does not delay each identity's startup. HTTPS certificate/hostname verification remains enabled. A polling round runs identities concurrently, then orders the available candidates by priority/deadline/creation time as before. Ordinary workspace locking and `max_parallel` still apply. Task execution has separate clients, so rotating or closing a polling connection does not close an active task's transport.
 
 `request_timeout_seconds` in `dispatcher.json` defaults to **3 seconds** (allowed range 0.2–10). It bounds the complete per-identity polling sequence, including paginated role/task reads. It also sets the per-I/O timeout for the task's synchronous preflight/publication requests. A round can wait for a slow identity up to its polling deadline; waits are concurrent rather than added once per identity. Very large catalogues or slow storage may require increasing this setting.
 

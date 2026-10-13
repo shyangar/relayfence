@@ -4,7 +4,7 @@ Initial verification date: 2026-10-10. This file records actual checks and their
 
 ## Process and IPC verification (2026-10-13)
 
-- Windows / CPython 3.12.13: **180 passed, 1 platform-specific skip**, combined line/branch coverage **92.72%**. Ruff lint/format checks passed. The skipped case exercises POSIX `SIGTERM` cleanup and runs on the Linux/macOS CI jobs.
+- Windows / CPython 3.12.13: **180 passed, 1 platform-specific skip**, combined line/branch coverage **92.42%**. Ruff lint/format checks passed. The skipped case exercises POSIX `SIGTERM` cleanup and runs on the Linux/macOS CI jobs.
 - Real subprocess regressions cover a wrapper exiting before its children/grandchildren, command failure, execution timeout, local stop, lease loss, final stderr/event-log limits, and cancelling an outstanding HTTP renewal.
 - Windows tests forcibly kill the owner without running Python cleanup and verify the job's descendants stop. Startup-gate tests deliberately delay or fail job assignment and verify that the adapter cannot start early.
 - Transport tests exercise a real HTTP server that never replies or trickles response bytes, polling connection reuse/credential replacement, bounded parallel polling, independent failure backoff, invalid envelopes and bounded response storage.

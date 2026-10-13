@@ -3,6 +3,7 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from urllib.parse import urlparse
 
 import httpx
@@ -13,6 +14,13 @@ from .models import OPERATIONS
 # List/claim replies contain multiple 128 KiB values; the request limit is too
 # small for replies. Bound decoded response storage, including chunked bodies.
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+
+
+@lru_cache(maxsize=1)
+def _ssl_context():
+    # Loading the same CA bundle per identity blocks the polling event loop on
+    # Windows. Share the verified context; never disable certificate validation.
+    return httpx.create_ssl_context(verify=True, trust_env=False)
 
 
 def _transport_error():
@@ -91,6 +99,7 @@ class RelayFenceClient:
             base_url=self.url,
             headers={"Authorization": "Bearer " + token},
             timeout=timeout,
+            verify=_ssl_context(),
             trust_env=False,
             follow_redirects=False,
         )
@@ -135,6 +144,7 @@ class AsyncRelayFenceClient:
             base_url=validate_url(url),
             headers={"Authorization": authorization},
             timeout=timeout,
+            verify=_ssl_context(),
             trust_env=False,
             follow_redirects=False,
         )
