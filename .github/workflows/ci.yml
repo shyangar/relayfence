@@ -42,7 +42,7 @@ jobs:
         if: always()
         run: uv run python -c "from pathlib import Path; p = Path('.coverage'); p.exists() and p.replace('.coverage.${{ runner.os }}-py${{ matrix.python }}')"
       - run: uv run python examples/role_models.py
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: coverage-${{ matrix.os }}-${{ matrix.python }}
@@ -75,7 +75,7 @@ jobs:
       - run: uv run coverage combine coverage-data
       - run: uv run coverage report --fail-under=90
       - run: uv run coverage xml
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-combined
           path: coverage.xml
@@ -94,7 +94,7 @@ jobs:
       - run: uv sync --locked
       - run: uv build
       - run: uv run python scripts/smoke_wheel.py dist/relayfence-0.3.0-py3-none-any.whl
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: distribution
           path: dist/*
