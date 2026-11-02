@@ -1,3 +1,4 @@
+import pytest
 from starlette.testclient import TestClient
 
 from relayfence.local_session import BrowserSessions
@@ -64,9 +65,15 @@ def test_local_ledger_busy_answers_503_and_interrupted_body_is_swallowed(ledger,
         assert "database is locked" not in result.text
 
 
-def test_browser_directory_listing_is_authenticated_and_excludes_files(ledger, tmp_path):
+@pytest.mark.parametrize("parent_name", ["workspace", "private"])
+def test_browser_directory_listing_is_authenticated_and_excludes_files(
+    ledger, tmp_path, parent_name
+):
+    tmp_path = tmp_path / parent_name
+    tmp_path.mkdir()
+    private_content = "fixture-file-content-that-must-not-be-listed"
     (tmp_path / "项目").mkdir()
-    (tmp_path / "secret.token").write_text("private")
+    (tmp_path / "secret.token").write_text(private_content)
     with TestClient(
         create_app(ledger.store, TOKEN, workspace_manager=Manager()), base_url=ORIGIN
     ) as client:
@@ -75,7 +82,8 @@ def test_browser_directory_listing_is_authenticated_and_excludes_files(ledger, t
         result = client.post("/local/browse", json={"path": str(tmp_path)}, headers=headers)
         assert result.status_code == 200
         assert result.json()["directories"] == [{"name": "项目", "path": str(tmp_path / "项目")}]
-        assert "private" not in result.text
+        assert private_content not in result.text
+        assert "secret.token" not in result.text
         assert (
             client.post("/local/browse", json={"path": "relative"}, headers=headers).status_code
             == 400

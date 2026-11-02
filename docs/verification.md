@@ -2,6 +2,12 @@
 
 Initial verification date: 2026-10-10. This file records actual checks and their scope, not a reliability SLA.
 
+## Cross-platform CI correction (2026-11-02)
+
+- Commit 270a71e passed all functional tests on Ubuntu (730 passed, 5 platform skips), but failed the 90% coverage gate because Windows-only modules were counted as unexecuted there. The Windows matrix job and Linux wheel smoke test succeeded. macOS additionally exposed a test assertion that confused its temporary path's `private` component with the file-content marker.
+- Directory-listing regression cases now exercise both ordinary and `private` parent directories and check a unique synthetic content marker and the excluded filename. The authenticated directory-only response must still match exactly.
+- Each matrix job still runs the complete applicable test suite and publishes uniquely named, relative-path coverage data. A dependent job requires reports from all four OS/Python combinations, combines them and enforces the unchanged 90% threshold. A failed platform test prevents this job from succeeding; no platform-specific source files are omitted from coverage.
+
 ## Publication checks (2026-11-02)
 
 - Release scope is the indexed source, tests, documentation and reviewed fixture images. Runtime ledgers, logs, local credentials, browser captures, temporary test directories and unrelated scratch projects are excluded. Developer-specific project names were removed from documentation; networking fixtures use reserved example addresses.

@@ -35,12 +35,49 @@ jobs:
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run ruff format --check .
-      - run: uv run pytest --cov=relayfence --cov-fail-under=90 --cov-report=term-missing --cov-report=xml
+      # Platform-only code is covered by its native runner. Enforce the same
+      # 90% threshold on their combined report in the coverage job below.
+      - run: uv run pytest --cov=relayfence --cov-fail-under=0 --cov-report=term-missing --cov-report=xml
+      - name: Name platform coverage data
+        if: always()
+        run: uv run python -c "from pathlib import Path; p = Path('.coverage'); p.exists() and p.replace('.coverage.${{ runner.os }}-py${{ matrix.python }}')"
       - run: uv run python examples/role_models.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: coverage-${{ matrix.os }}-${{ matrix.python }}
+          path: |
+            coverage.xml
+            .coverage.*
+          include-hidden-files: true
+          if-no-files-found: error
+
+  coverage:
+    name: Combined platform coverage (90%)
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: "0.11.2"
+          python-version: "3.13"
+      - run: uv sync --locked
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: coverage-*
+          path: coverage-data
+          merge-multiple: true
+      - name: Require all platform reports
+        run: |
+          uv run python -c "from pathlib import Path; expected = {'.coverage.Linux-py3.11', '.coverage.Linux-py3.13', '.coverage.Windows-py3.13', '.coverage.macOS-py3.13'}; found = {p.name for p in Path('coverage-data').glob('.coverage.*')}; assert found == expected, f'Missing or unexpected reports: {expected ^ found}'"
+      - run: uv run coverage combine coverage-data
+      - run: uv run coverage report --fail-under=90
+      - run: uv run coverage xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-combined
           path: coverage.xml
 
   package:
