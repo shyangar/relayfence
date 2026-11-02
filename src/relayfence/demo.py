@@ -249,7 +249,7 @@ def run_demo(directory: Path | None = None):
         "checks": checks,
         "events": events,
         "vendor_clients_tested": [],
-        "note": "Protocol clients are not live Codex, ZCode or DSH sessions.",
+        "note": "Protocol clients are not live Codex, OpenCode, ZCode or DSH sessions.",
     }
     (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"\nAll {len(checks)} checks passed. Report: {directory / 'report.json'}")

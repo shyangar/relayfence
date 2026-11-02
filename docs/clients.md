@@ -1,6 +1,6 @@
-# Connect Codex, ZCode and DSH
+# Connect Codex, OpenCode, ZCode and DSH
 
-Updated 2026-10-10. Here, **ZCode** means Zhipu's ZCode and **DSH** means DeepSeek Harness.
+Updated 2026-10-20. Here, **ZCode** means Zhipu's ZCode, **DSH** means DeepSeek Harness, and **OpenCode** means the OpenCode V2 CLI.
 
 The coordination boundary is the service URL plus the project name, not the vendor or model. Two Codex instances can coordinate; a Codex instance and a ZCode instance can coordinate through the same API as well.
 
@@ -14,12 +14,13 @@ uv run relayfence init
 uv run relayfence serve
 ~~~
 
-Keep this running while clients connect. The service's access token is in the local `.relayfence/access.token` file. This is a RelayFence credential, not a model API key.
+Keep this running while clients connect. The service's access token is the `access.token` file in the state directory passed to `serve --directory` (platform application data by default; an existing `.relayfence` is reused). This is a RelayFence credential, not a model API key.
 
 The quickest reproducible setup uses the included stdio bridge. Generate a snippet from a second terminal:
 
 ~~~bash
 uv run relayfence config codex
+uv run relayfence config opencode
 uv run relayfence config zcode
 uv run relayfence config dsh
 ~~~
@@ -41,12 +42,38 @@ codex mcp add relayfence --url http://127.0.0.1:7433/mcp --bearer-token-env-var 
 PowerShell example for the current terminal:
 
 ~~~powershell
-$env:RELAYFENCE_TOKEN = (Get-Content -Raw .relayfence/access.token).Trim()
+# New install: platform state directory. Replace with .relayfence/access.token
+# when the legacy in-directory state exists.
+$env:RELAYFENCE_TOKEN = (Get-Content -Raw "$env:LOCALAPPDATA\relayfence\access.token").Trim()
 ~~~
 
 An already-running desktop process may not inherit a terminal's updated environment; the generated stdio configuration with a token file avoids that requirement.
 
 Source: [official Codex MCP documentation](https://developers.openai.com/codex/mcp). The installed CLI's `mcp add/get --help` was also checked.
+
+## OpenCode
+
+Merge the generated JSON into a project `opencode.json`/`opencode.jsonc` or the global `~/.config/opencode/opencode.json` (`$XDG_CONFIG_HOME/opencode` when set). Preserve other keys. OpenCode V2 nests local MCP servers under `mcp.servers` and takes the whole argv as one `command` array:
+
+~~~json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "relayfence": {
+        "type": "local",
+        "command": ["/absolute/python", "-m", "relayfence", "bridge"]
+      }
+    }
+  }
+}
+~~~
+
+The generated snippet already contains the URL and token file. You can also let the CLI edit the right scope with `opencode mcp add relayfence -- /absolute/python -m relayfence bridge ...`, but check the result because the generated bridge arguments include the URL and private token file. Do not commit a token value; the snippet references the token file. OpenCode's default Code Mode groups the RelayFence tools under `tools.relayfence.*`.
+
+For direct Streamable HTTP, configure a `remote` server with `url: "http://127.0.0.1:7433/mcp"` and an `Authorization` header sourced from the environment, for example `"Bearer {env:RELAYFENCE_TOKEN}"`.
+
+Source: [OpenCode V2 MCP servers](https://opencode.ai/v2/docs/mcp-servers/) and [commands](https://opencode.ai/v2/docs/cli/commands/).
 
 ## ZCode
 
@@ -64,6 +91,19 @@ Source: [official ZCode MCP services documentation](https://zcode.z.ai/en/docs/m
 ## DeepSeek Harness
 
 Add the generated YAML entry to the MCP client plugin entries in the profile you run. The entry uses the official `@deepseek-ai/dsh-mcp-client` package and `transport: stdio`.
+
+When adding a new plugin to an existing `cordis.patch.yml`, wrap the generated entry in an `insert` operation (verified with desktop 0.2.0-rc.2):
+
+~~~yaml
+- insert:
+    - id: mcp-relayfence
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: relayfence
+        transport: stdio
+        command: /absolute/path/to/python
+        args: ['-m', relayfence, bridge, '--url', 'http://127.0.0.1:7433', '--token-file', '/private/instance.token']
+~~~
 
 For direct HTTP, the equivalent entry is:
 
@@ -88,7 +128,9 @@ Ask each client to list RelayFence tools, then call `items_list` with `{"request
 
 Next, create one task and ask both clients to claim its ID using distinct actor/request IDs. Exactly one live claim should succeed. Feed each client [the cooperation instructions](../examples/agent-instructions.md), choosing a project and actor name explicitly.
 
-The service exposes tools; it cannot force a model to call them, infer what files it read, or automatically wake another application. Event consumers poll `events_list`. There is no push subscription or scheduler in v0.1.
+The service exposes tools; it cannot force a model to call them, infer what files it read, or automatically wake another application. Event consumers poll `events_list`. There is no push subscription. The optional v0.3 local dispatcher polls and executes configured command-mode agents; it does not wake existing desktop chats.
+
+For role-assigned work, register an instance, issue its own credential and generate its connector with `--token-file <instance.token>`. Its actor must match its instance ID. Set the required model in the external client before acknowledging the role selection in `task_claim`. The coordination MCP tools do not switch host models. See [roles and models](roles-and-models.md) for console setup and the separate local command adapter.
 
 ## Verification matrix
 
@@ -98,8 +140,9 @@ The service exposes tools; it cannot force a model to call them, infer what file
 | MCP Streamable HTTP, legacy initialization | Same server, official SDK `mode="legacy"`; discovery and calls tested |
 | MCP stdio bridge → HTTP ledger | Actual stdio subprocess plus an independent HTTP client; shared ownership conflict tested |
 | Python HTTP client | Authentication, structured errors, retry receipts and concurrency tested |
-| Codex | Generated TOML parsed and installed CLI options checked; **no live model session tested** |
-| ZCode | Configuration documented against official docs; **no installed client/model session tested** |
-| DSH | Configuration documented against official plugin docs; **no installed harness/model session tested** |
+| Codex | Generated TOML parsed and installed CLI options checked; live Codex CLI 0.130.0 with native MCP completed a specification task; desktop UI control was not tested |
+| OpenCode | Generated V2 `mcp.servers` JSON checked against the documented shape; the local background adapter and model catalogue are covered by fixture tests, not a live OpenCode model session |
+| ZCode | Workspace configuration checked in the installed application; no usable model session was available, so ZCode generation remains unverified |
+| DSH | DeepSeek Harness desktop 0.2.0-rc.2 read a Codex artifact and published 10 cases through MCP; wrong-role/model claims rejected; malformed model output recovered by reusing the live lease |
 
 Protocol compatibility is useful evidence, but it does not establish model behavior or vendor end-to-end certification. Submit a reproducible issue with client version, transport, redacted configuration and exact error to extend this matrix. Never attach access tokens or lease tokens.

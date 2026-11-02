@@ -14,11 +14,25 @@ from contextlib import contextmanager
 from importlib.resources import files
 from pathlib import Path
 
+from .decisions import Decisions
+from .delivery import Delivery
 from .errors import CoordinationError
-from .models import Mutation, Request
+from .identity import ADMIN, Principal
+from .meetings import Meetings
+from .models import OPERATIONS, Mutation, Request
+from .office import Office
+from .project_overview import ProjectOverview
+from .registry import Registry
+from .skills import SkillView
+from .storage import GroupLogs
+from .task_management import TaskManagement
 
 MAX_PAYLOAD_BYTES = 131_072
 MAX_GRAPH_NODES = 256
+MAX_LIST_BYTES = 8_388_608
+# These key spaces are written by task/meeting internals. Allowing a state_put
+# to create them would squat a version and make the internal write fail later.
+RESERVED_ITEM_PREFIXES = ("tasks/", "meetings/")
 
 
 def encode(value) -> str:
@@ -31,19 +45,56 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-class Store:
+class Store(
+    Registry,
+    TaskManagement,
+    Office,
+    Meetings,
+    GroupLogs,
+    SkillView,
+    Decisions,
+    Delivery,
+    ProjectOverview,
+):
+    encode = staticmethod(encode)
+    digest = staticmethod(digest)
+
     def __init__(self, path: str | Path, clock: Callable[[], float] = time.time):
         self.path = Path(path).resolve()
         self.clock = clock
+        SkillView.__init__(self)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:
             db.execute("PRAGMA journal_mode=WAL")
-            version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
-                raise RuntimeError(f"Unsupported database schema {version}; expected 1")
-            if version == 0:
-                schema = files("relayfence").joinpath("schema.sql").read_text(encoding="utf-8")
-                db.executescript("BEGIN IMMEDIATE;\n" + schema + "\nCOMMIT;")
+            # Check the version under the write lock; concurrent starters cannot migrate twice.
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                version = db.execute("PRAGMA user_version").fetchone()[0]
+                if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12):
+                    raise RuntimeError(f"Unsupported database schema {version}; expected 12")
+                scripts = (
+                    (["schema.sql"] if version == 0 else [])
+                    + (["migration_2.sql"] if version < 2 else [])
+                    + (["migration_3.sql"] if version < 3 else [])
+                    + (["migration_4.sql"] if version < 4 else [])
+                    + (["migration_5.sql"] if version < 5 else [])
+                    + (["migration_6.sql"] if version < 6 else [])
+                    + (["migration_7.sql"] if version < 7 else [])
+                    + (["migration_8.sql"] if version < 8 else [])
+                    + (["migration_9.sql"] if version < 9 else [])
+                    + (["migration_10.sql"] if version < 10 else [])
+                    + (["migration_11.sql"] if version < 11 else [])
+                    + (["migration_12.sql"] if version < 12 else [])
+                )
+                for name in scripts:
+                    sql = files("relayfence").joinpath(name).read_text(encoding="utf-8")
+                    for statement in sql.split(";"):
+                        if statement.strip():
+                            db.execute(statement)
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
 
     @contextmanager
     def connection(self):
@@ -56,16 +107,63 @@ class Store:
         finally:
             db.close()
 
-    def execute(self, operation: str, request: Request) -> dict:
-        raw = encode({"operation": operation, "request": request.model_dump(mode="json")})
+    def execute(self, operation: str, request: Request, principal: Principal = ADMIN) -> dict:
+        payload = request.model_dump(mode="json")
+        if operation == "office_dispatch" and payload.get("leader_id") is None:
+            payload.pop("leader_id", None)
+            payload.pop("mode", None)
+        # Preserve v0.1 receipt hashes when the newly optional fields are absent.
+        for field in {
+            "task_create": ["role_id"],
+            "task_claim": ["selection"],
+            "task_complete": ["reported_model"],
+            "task_update": ["review_required"],
+        }.get(operation, []):
+            if payload.get(field) is None:
+                payload.pop(field, None)
+        if operation == "office_dispatch" and not payload.get("review_required"):
+            payload.pop("review_required", None)
+        if operation == "task_create":
+            for field, default in {
+                "priority": 1,
+                "due_at": None,
+                "depends_on": [],
+                "review_required": False,
+            }.items():
+                if payload.get(field) == default:
+                    payload.pop(field, None)
+        # An empty skill selection must hash exactly like a pre-skill request, so
+        # existing receipts still replay instead of reporting an idempotency conflict.
+        selection = payload.get("selection")
+        if isinstance(selection, dict) and not selection.get("skills"):
+            selection.pop("skills", None)
+        if isinstance(selection, dict) and selection.get("mcp_servers") is None:
+            selection.pop("mcp_servers", None)
+        if operation == "office_dispatch" and payload.get("member_overrides"):
+            # Absent MCP means keep the member default; explicit null means
+            # inherit runtime configuration. Their receipts must stay distinct.
+            payload["member_overrides"] = {
+                key: value.model_dump(mode="json", exclude_unset=True)
+                for key, value in request.member_overrides.items()
+            }
+        if operation == "office_dispatch" and not payload.get("member_overrides"):
+            payload.pop("member_overrides", None)
+        if operation == "office_put":
+            for group in payload.get("groups", []):
+                for member in group.get("members", []):
+                    if member.get("mcp_servers") is None:
+                        member.pop("mcp_servers", None)
+        raw = encode({"operation": operation, "request": payload})
         if len(raw.encode("utf-8")) > MAX_PAYLOAD_BYTES:
             raise CoordinationError("payload_too_large", "Request exceeds 128 KiB", status=413)
         mutation = isinstance(request, Mutation)
+        receipted = mutation and operation != "runner_heartbeat"
         with self.connection() as db:
             try:
                 db.execute("BEGIN IMMEDIATE" if mutation else "BEGIN")
                 now = self.clock()  # Time is sampled after acquiring the write lock.
-                if mutation:
+                self._authorize(db, operation, request, principal)
+                if receipted:
                     receipt = db.execute(
                         "SELECT digest,response FROM receipts WHERE project=? AND actor=? AND request_id=?",
                         (request.project, request.actor, request.request_id),
@@ -85,7 +183,7 @@ class Store:
                     "data": getattr(self, "_" + operation)(db, request, now),
                     "replayed": False,
                 }
-                if mutation:
+                if receipted:
                     db.execute(
                         "INSERT INTO receipts VALUES (?,?,?,?,?,?)",
                         (
@@ -103,8 +201,7 @@ class Store:
                 db.rollback()
                 raise
 
-    @staticmethod
-    def _event(db, r, now, kind, subject, details):
+    def _event(self, db, r, now, kind, subject, details):
         db.execute(
             "INSERT INTO events(project,actor,kind,subject,details,created_at) VALUES (?,?,?,?,?,?)",
             (
@@ -116,6 +213,10 @@ class Store:
                 now,
             ),
         )
+        # Task events are mirrored into the owning group's durable log.  The
+        # event ledger remains the source of truth; the group log is an indexed
+        # projection for pagination and analysis.
+        self.record_event(db, r.project, kind, subject, details, now)
 
     @staticmethod
     def _head(db, project, key):
@@ -144,8 +245,21 @@ class Store:
 
     @staticmethod
     def _write_item(db, r, now, key, kind, version, value, dependencies):
+        existing = db.execute(
+            "SELECT 1 FROM revisions WHERE project=? AND key=? AND version=?",
+            (r.project, key, version),
+        ).fetchone()
+        if existing:
+            raise CoordinationError(
+                "state_conflict",
+                "This key version already exists; read the current version first",
+                {"key": key, "version": version},
+                409,
+            )
         db.execute(
-            "INSERT INTO items VALUES (?,?,?,?) ON CONFLICT(project,key) DO UPDATE SET version=excluded.version",
+            "INSERT INTO items VALUES (?,?,?,?) ON CONFLICT(project,key) DO UPDATE SET "
+            "version=CASE WHEN excluded.version>items.version THEN excluded.version "
+            "ELSE items.version END",
             (r.project, key, kind, version),
         )
         db.execute(
@@ -226,7 +340,26 @@ class Store:
             **freshness,
         }
 
+    def _capabilities(self, db, r, now):
+        """Report the operations this process actually loaded.
+
+        Static assets are re-read from disk on every request while Python modules
+        load once per process, so a browser can be newer than the server. Answering
+        from the live registry lets newer assets degrade instead of failing.
+        """
+        return {
+            "operations": sorted(OPERATIONS),
+            "schema": db.execute("PRAGMA user_version").fetchone()[0],
+        }
+
     def _state_put(self, db, r, now):
+        if any(r.key.startswith(prefix) for prefix in RESERVED_ITEM_PREFIXES):
+            raise CoordinationError(
+                "reserved_key",
+                "This key is managed by RelayFence task or meeting internals",
+                {"key": r.key},
+                422,
+            )
         version = self._check_version(db, r.project, r.key, r.expected_version, "state")
         self._write_item(db, r, now, r.key, "state", version, r.value, [])
         self._event(db, r, now, "state.updated", r.key, {"version": version})
@@ -240,9 +373,17 @@ class Store:
             "SELECT key FROM items WHERE project=? AND key>? ORDER BY key LIMIT ?",
             (r.project, r.after, r.limit + 1),
         ).fetchall()
+        items, size = [], 0
+        for row in rows[: r.limit]:
+            item = self._item(db, r.project, row["key"])
+            encoded = len(encode(item).encode("utf-8"))
+            if items and size + encoded > MAX_LIST_BYTES:
+                break
+            items.append(item)
+            size += encoded
         return {
-            "items": [self._item(db, r.project, row["key"]) for row in rows[: r.limit]],
-            "next_cursor": rows[r.limit - 1]["key"] if len(rows) > r.limit else None,
+            "items": items,
+            "next_cursor": items[-1]["key"] if len(rows) > len(items) and items else None,
         }
 
     @staticmethod
@@ -257,7 +398,22 @@ class Store:
     def _task_view(self, db, project, row, now):
         outputs = json.loads(row["outputs"])
         freshness = self._freshness(db, project, outputs)[0] if outputs else None
+        if freshness is not None:
+            changed = self._changed_task_dependencies(db, project, row)
+            if changed:
+                freshness = {**freshness, "fresh": False, "stale_tasks": changed}
+        blockers = self._task_blockers(db, project, row) if row["status"] == "ready" else []
+        review_required, review = self._review_info(db, project, row)
+        waiting = bool(
+            db.execute(
+                "SELECT 1 FROM decisions WHERE project=? AND task_id=? AND status='pending'",
+                (project, row["task_id"]),
+            ).fetchone()
+        )
         return {
+            "review_required": review_required,
+            "review": review,
+            "attempt_count": row["fence"],
             "task_id": row["task_id"],
             "title": row["title"],
             "description": row["description"],
@@ -272,18 +428,71 @@ class Store:
             "outputs": outputs,
             "result_freshness": freshness,
             "updated_at": row["updated_at"],
+            "role_id": row["role_id"],
+            "execution": json.loads(row["execution"]) if row["execution"] else None,
+            "priority": row["priority"],
+            "due_at": row["due_at"],
+            "created_at": row["created_at"],
+            "depends_on": json.loads(row["depends_on"]),
+            "task_snapshot": json.loads(row["task_snapshot"]),
+            "failure": json.loads(row["failure"]) if row["failure"] else None,
+            "blockers": blockers,
+            "waiting_user": waiting,
+            "display_status": "waiting_user"
+            if waiting
+            else "awaiting_review"
+            if row["status"] == "done"
+            and review_required
+            and review
+            and review["status"] == "pending"
+            else "lease_expired"
+            if row["status"] == "running" and row["expires_at"] <= now
+            else "blocked"
+            if blockers
+            else row["status"],
         }
 
     def _task_create(self, db, r, now):
+        self._validate_task_dependencies(db, r.project, r.task_id, r.depends_on)
+        if r.role_id:
+            self._registry_row(db, "roles", r.project, r.role_id)
         if db.execute(
             "SELECT 1 FROM tasks WHERE project=? AND task_id=?", (r.project, r.task_id)
         ).fetchone():
             raise CoordinationError(
                 "already_exists", "Task ID already exists", {"task_id": r.task_id}
             )
+        # Deletion keeps the audit trail (including task events and group
+        # conversation). Reusing an ID would silently merge the new task into
+        # that history, so require a fresh one.
+        if db.execute(
+            "SELECT 1 FROM events WHERE project=? AND subject=? AND kind='task.created'",
+            (r.project, r.task_id),
+        ).fetchone():
+            raise CoordinationError(
+                "already_exists",
+                "Task ID has been used before; choose a new ID to keep its history unambiguous",
+                {"task_id": r.task_id},
+            )
         db.execute(
-            "INSERT INTO tasks(project,task_id,title,description,inputs,status,created_at,updated_at) VALUES (?,?,?,?,?,'ready',?,?)",
-            (r.project, r.task_id, r.title, r.description, encode(r.inputs), now, now),
+            "INSERT INTO tasks(project,task_id,title,description,inputs,status,created_at,updated_at,role_id,priority,due_at,depends_on) VALUES (?,?,?,?,?,'ready',?,?,?,?,?,?)",
+            (
+                r.project,
+                r.task_id,
+                r.title,
+                r.description,
+                encode(r.inputs),
+                now,
+                now,
+                r.role_id,
+                r.priority,
+                r.due_at,
+                encode(r.depends_on),
+            ),
+        )
+        db.execute(
+            "INSERT INTO task_policies VALUES (?,?,?)",
+            (r.project, r.task_id, int(r.review_required)),
         )
         self._event(db, r, now, "task.created", r.task_id, {"inputs": r.inputs})
         return self._task_get(db, r, now)
@@ -297,25 +506,51 @@ class Store:
             if r.available_only
             else ""
         )
-        params = (
-            (r.project, r.after, now, r.limit + 1)
-            if r.available_only
-            else (r.project, r.after, r.limit + 1)
-        )
+        params = [r.project, r.after] + ([now] if r.available_only else [])
+        filters = ""
+        if r.status:
+            filters += " AND status=?"
+            params.append(
+                {
+                    "blocked": "ready",
+                    "awaiting_review": "done",
+                    "waiting_user": "paused",
+                    "lease_expired": "running",
+                }.get(r.status, r.status)
+            )
+        if r.role_id:
+            filters += " AND role_id=?"
+            params.append(r.role_id)
+        if r.query:
+            filters += " AND instr(lower(task_id || ' ' || title || ' ' || description),lower(?))>0"
+            params.append(r.query)
         rows = db.execute(
-            f"SELECT * FROM tasks WHERE project=? AND task_id>? {available} ORDER BY task_id LIMIT ?",
+            f"SELECT * FROM tasks WHERE project=? AND task_id>? {available} {filters} ORDER BY task_id",
             params,
-        ).fetchall()
+        )
+        tasks = []
+        for row in rows:
+            task = self._task_view(db, r.project, row, now)
+            if r.status and task["display_status"] != r.status:
+                continue
+            tasks.append(task)
+            if len(tasks) > r.limit:
+                break
         return {
-            "tasks": [self._task_view(db, r.project, row, now) for row in rows[: r.limit]],
-            "next_cursor": rows[r.limit - 1]["task_id"] if len(rows) > r.limit else None,
+            "tasks": tasks[: r.limit],
+            "next_cursor": tasks[r.limit - 1]["task_id"] if len(tasks) > r.limit else None,
         }
 
     def _task_claim(self, db, r, now):
         row = self._task_row(db, r.project, r.task_id)
+        execution = self._claim_execution(db, r, row)
         if row["status"] == "done":
             raise CoordinationError(
                 "task_done", "Reopen the completed task before claiming it again"
+            )
+        if row["status"] not in ("ready", "running"):
+            raise CoordinationError(
+                "invalid_transition", "Resume or retry this task before claiming"
             )
         if row["status"] == "running" and row["expires_at"] > now:
             raise CoordinationError(
@@ -323,7 +558,27 @@ class Store:
                 "Another live lease owns this task",
                 {"expires_at": row["expires_at"], "fence": row["fence"]},
             )
-        inputs = [self._item(db, r.project, key) for key in json.loads(row["inputs"])]
+        # Meeting pauses and task dependencies are prerequisites too. Filtering
+        # to task blockers let a paused meeting keep dispatching its members.
+        # Input blockers keep their specific not_found/stale_input errors below.
+        blockers = [
+            blocker
+            for blocker in self._task_blockers(db, r.project, row)
+            if blocker["kind"] != "input"
+        ]
+        if blockers:
+            raise CoordinationError(
+                "task_blocked",
+                "Prerequisites are not ready",
+                {"blockers": blockers},
+            )
+        task_snapshot = []
+        input_keys = list(json.loads(row["inputs"]))
+        for ident in json.loads(row["depends_on"]):
+            prerequisite = self._task_row(db, r.project, ident)
+            task_snapshot.append({"task_id": ident, "fence": prerequisite["fence"]})
+            input_keys.extend(o["key"] for o in json.loads(prerequisite["outputs"]))
+        inputs = [self._item(db, r.project, key) for key in dict.fromkeys(input_keys)]
         refs = [{"key": item["key"], "version": item["version"]} for item in inputs]
         fresh, _ = self._freshness(db, r.project, refs)
         if not fresh["fresh"]:
@@ -333,7 +588,7 @@ class Store:
         token = secrets.token_urlsafe(32)
         fence = row["fence"] + 1
         db.execute(
-            "UPDATE tasks SET status='running',revision=revision+1,fence=?,owner=?,lease_hash=?,expires_at=?,snapshot=?,updated_at=? WHERE project=? AND task_id=?",
+            "UPDATE tasks SET status='running',revision=revision+1,fence=?,owner=?,lease_hash=?,expires_at=?,snapshot=?,updated_at=?,execution=?,task_snapshot=?,failure=NULL WHERE project=? AND task_id=?",
             (
                 fence,
                 r.actor,
@@ -341,6 +596,8 @@ class Store:
                 now + r.lease_seconds,
                 encode(refs),
                 now,
+                encode(execution) if execution else None,
+                encode(task_snapshot),
                 r.project,
                 r.task_id,
             ),
@@ -351,7 +608,12 @@ class Store:
             now,
             "task.claimed",
             r.task_id,
-            {"fence": fence, "takeover": row["status"] == "running", "inputs": refs},
+            {
+                "fence": fence,
+                "takeover": row["status"] == "running",
+                "inputs": refs,
+                "execution": execution,
+            },
         )
         return {"task": self._task_get(db, r, now), "lease_token": token, "inputs": inputs}
 
@@ -397,6 +659,26 @@ class Store:
 
     def _task_complete(self, db, r, now):
         row = self._assert_lease(db, r, now)
+        changed = self._changed_task_dependencies(db, r.project, row)
+        if changed:
+            raise CoordinationError(
+                "stale_input",
+                "Prerequisite tasks changed during execution",
+                {"stale_tasks": changed},
+            )
+        execution = json.loads(row["execution"]) if row["execution"] else None
+        if r.reported_model:
+            if not execution:
+                raise CoordinationError(
+                    "role_required", "Model reports require a role execution snapshot"
+                )
+            requested = execution["requested"]["model"]
+            if requested is not None and requested != r.reported_model:
+                raise CoordinationError(
+                    "model_mismatch", "Reported model differs from the requested model"
+                )
+            execution["reported_model"] = r.reported_model
+            execution["model_evidence"] = "worker_reported"
         refs = json.loads(row["snapshot"])
         fresh, ancestors = self._freshness(db, r.project, refs)
         if not fresh["fresh"]:
@@ -422,12 +704,34 @@ class Store:
             self._write_item(db, r, now, output.key, "artifact", version, output.value, refs)
             published.append({"key": output.key, "version": version})
         db.execute(
-            "UPDATE tasks SET status='done',revision=revision+1,lease_hash=NULL,expires_at=NULL,outputs=?,updated_at=? WHERE project=? AND task_id=?",
-            (encode(published), now, r.project, r.task_id),
+            "UPDATE tasks SET status='done',revision=revision+1,lease_hash=NULL,expires_at=NULL,outputs=?,updated_at=?,execution=? WHERE project=? AND task_id=?",
+            (
+                encode(published),
+                now,
+                encode(execution) if execution else None,
+                r.project,
+                r.task_id,
+            ),
         )
         self._event(
-            db, r, now, "task.completed", r.task_id, {"fence": r.fence, "outputs": published}
+            db,
+            r,
+            now,
+            "task.completed",
+            r.task_id,
+            {
+                "fence": r.fence,
+                "outputs": published,
+                "execution": execution,
+                "review_required": self._review_info(db, r.project, row)[0],
+            },
         )
+        required, _ = self._review_info(db, r.project, row)
+        if required:
+            db.execute(
+                "INSERT INTO task_reviews VALUES (?,?,?,'pending',NULL,'','[]',?)",
+                (r.project, r.task_id, r.fence, now),
+            )
         return {
             "task": self._task_get(db, r, now),
             "artifacts": [self._item(db, r.project, o["key"]) for o in published],
@@ -452,9 +756,11 @@ class Store:
 
     @staticmethod
     def _events_list(db, r, now):
+        subject = " AND subject=?" if r.subject else ""
+        params = [r.project, r.after] + ([r.subject] if r.subject else []) + [r.limit + 1]
         rows = db.execute(
-            "SELECT * FROM events WHERE project=? AND seq>? ORDER BY seq LIMIT ?",
-            (r.project, r.after, r.limit + 1),
+            f"SELECT * FROM events WHERE project=? AND seq>? {subject} ORDER BY seq LIMIT ?",
+            params,
         ).fetchall()
         events = [{**dict(row), "details": json.loads(row["details"])} for row in rows[: r.limit]]
         return {

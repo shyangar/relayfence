@@ -1,8 +1,10 @@
 import json
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
+from relayfence.errors import CoordinationError
 from relayfence.service import Service
 from relayfence.store import Store
 
@@ -305,3 +307,51 @@ def test_dependency_bound_fails_closed(ledger, monkeypatch):
 )
 def test_out_of_range_integer_never_reaches_sqlite(ledger, operation, payload):
     ledger.error("invalid_request", operation, **payload)
+
+
+def test_paused_meeting_blocks_task_claim(ledger):
+    ledger.ok("task_create", task_id="t", title="Task")
+    with ledger.store.connection() as db:
+        db.execute(
+            "INSERT INTO meetings(project,meeting_id,definition) VALUES (?,?,?)",
+            ("default", "meeting", json.dumps({"paused": True, "waiting": ["t"]})),
+        )
+        db.execute(
+            "INSERT INTO meeting_tasks(project,task_id,meeting_id,member_id,group_id,stage) "
+            "VALUES ('default','t','meeting','member','group','executing')"
+        )
+
+    error = ledger.error("task_blocked", "task_claim", task_id="t")
+    assert error["details"]["blockers"] == [
+        {"kind": "meeting", "key": "meeting", "reason": "paused"}
+    ]
+
+
+@pytest.mark.parametrize("key", ["tasks/t/result", "meetings/meeting"])
+def test_agents_cannot_write_reserved_internal_keys(ledger, key):
+    error = ledger.error("reserved_key", "state_put", key=key, expected_version=0, value=1)
+    assert error["details"] == {"key": key}
+
+
+def test_duplicate_revision_is_a_conflict_and_items_never_downgrade(ledger):
+    request = SimpleNamespace(project="default", actor="worker")
+    with ledger.store.connection() as db:
+        ledger.store._write_item(
+            db, request, 1.0, "artifacts/report", "artifact", 2, {"version": 2}, []
+        )
+        ledger.store._write_item(
+            db, request, 2.0, "artifacts/report", "artifact", 1, {"version": 1}, []
+        )
+        assert (
+            db.execute(
+                "SELECT version FROM items WHERE project='default' AND key='artifacts/report'"
+            ).fetchone()[0]
+            == 2
+        )
+        with pytest.raises(CoordinationError) as caught:
+            ledger.store._write_item(
+                db, request, 3.0, "artifacts/report", "artifact", 1, {"version": 1}, []
+            )
+
+    assert caught.value.code == "state_conflict"
+    assert caught.value.status == 409

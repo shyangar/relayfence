@@ -11,21 +11,42 @@ Every request has `project` (default `default`). Every mutation requires `actor`
 | `state_put` | `key, expected_version, value` | New immutable state revision |
 | `item_get` | `key`; optional positive `version` | Value, version, current head and freshness |
 | `items_list` | Optional `after` key, `limit` | Current heads, next cursor |
-| `task_create` | `task_id, title`; optional `description, inputs` | Ready task |
+| `agent_put` | `agent_id, expected_revision, label, runtime`; optional `mode, enabled, capabilities, models` | Admin: CAS profile; create uses revision 0 |
+| `agent_get` / `agents_list` | `agent_id` / pagination | Public profiles without credentials |
+| `agent_token_rotate` | `agent_id, expected_revision` | Admin: updated profile and secret instance token |
+| `role_put` | `role_id, expected_revision, label, agent_id`; optional `selection, instructions, deliverables, required_capabilities` | Admin: validated CAS binding |
+| `role_get` / `roles_list` | `role_id` / pagination | Role binding / paginated bindings |
+| `task_assign` | `task_id, expected_revision`; optional nullable `role_id` | Admin: reassign ready/expired work |
+| `task_create` | `task_id, title`; optional `description, inputs, role_id` | Ready task |
 | `task_get` | `task_id` | Current status, revision, lease deadline and result freshness |
 | `tasks_list` | Optional `after` task ID, `limit, available_only` | Tasks, next cursor |
-| `task_claim` | `task_id`; optional `lease_seconds` | Task, secret lease token, input values and versions |
+| `task_claim` | `task_id`; optional `lease_seconds, selection` | Task, secret lease token, input versions and execution snapshot |
 | `task_heartbeat` | Lease fields; optional `lease_seconds` | Extended current task |
 | `task_release` | Lease fields | Task returned to ready |
-| `task_complete` | Lease fields; `outputs` | Completed task and published artifacts |
+| `task_complete` | Lease fields; `outputs`; optional `reported_model` | Completed task and published artifacts |
 | `task_reopen` | `task_id, expected_revision` | Completed task returned to ready |
-| `events_list` | Optional integer `after`, `limit` | Events, next cursor, has_more |
+| `task_update` | Task definition and `expected_revision` | Admin: edit inactive work; fields use creation defaults |
+| `task_control` | `task_id, expected_revision, action`; optional `reason` | Admin: pause/resume/cancel/retry; pause/cancel revoke leases |
+| `task_fail` | Lease fields, `error_code, message` | Failed attempt retained for explicit retry |
+| `runner_heartbeat` | `runner_id`; optional `active_task` | Current instance's runner presence |
+| `runners_list` | Project | Runner presence; online for 20 seconds after heartbeat |
+| `events_list` | Optional integer `after`, `limit`, `subject` | Filtered events, next cursor, has_more |
 
 Lease fields are `task_id, fence, lease_token` in addition to the mutation fields. Leases default to 300 seconds and accept 1–3,600 seconds. Use sensible renewal margin, such as renewing a 300-second lease every 60 seconds.
 
 Each output is `{"key": "...", "expected_version": 0, "value": ...}`. Completion requires 1–16 distinct outputs; task creation accepts up to 32 distinct inputs. Page limits are 1–200 (default 50). Payloads are limited to 128 KiB of canonical JSON; raw HTTP bodies also have a 128 KiB limit. MCP has additional framing allowance. Floats must be finite; unknown fields are rejected.
 
-`available_only` includes ready tasks and running tasks with expired leases. Claiming can still fail if declared inputs are missing/stale or another client wins the race.
+`available_only` includes ready tasks and running tasks with expired leases. It does not filter by caller eligibility. Claiming can still fail on assignment, missing/stale inputs, or a competing claim.
+
+Task creation/editing also accepts `priority` (integer 0–3, default 1), `due_at` (finite nonnegative Unix seconds or null), and up to 32 distinct `depends_on` task IDs. Prerequisites must exist, be acyclic, and have a closure of at most 256 tasks. Their current outputs join the claim input snapshot automatically. Claim checks completed/current prerequisites; completion also checks their captured fence generations. `display_status=blocked` is computed for ready tasks with unsatisfied prerequisites or inputs; it is not a stored lease state.
+
+`tasks_list` additionally accepts `status` (including computed `blocked`), `query` (literal case-insensitive substring of ID/title/description), and `role_id`. Filtering happens before cursor pagination. `status=ready` excludes blocked work. The dispatcher only schedules ready tasks; expired running leases need an explicit retry.
+
+`runner_heartbeat` updates one presence row per project/instance without a receipt or event. Other mutation retry guarantees remain unchanged. A command adapter may return `{"error":{"code":"agent_blocked","message":"Reason"}}` instead of outputs; this records failure rather than publishing an empty success.
+
+Model entries have `id` and an optional `parameters` object mapping names to allowed string values. A selection is `{"model": "id-or-null", "parameters": {"name": "value"}}`; model IDs accept 1–200 ASCII letters/digits and `_ . : / @ + -`, starting with a letter/digit. Profiles allow 64 models, 32 capabilities, 16 parameters/model and 32 values/parameter. Parameter values are 1–128 characters. Agent mode is `external` (default) or `command`. Role bindings and instance credentials are described in [roles and models](roles-and-models.md).
+
+Authenticated instance mutations require their registered actor and project. They may read project data, write shared state, create work, and claim/renew/release/complete/fail leases, and update their runner presence. Other mutations require the admin token. Assigned claims require the bound instance credential and an exact selection acknowledgment. New nullable request fields are omitted from canonical hashes when absent/null to preserve v0.1 receipts; JSON null artifact values are retained.
 
 ## Example MCP exchange
 
@@ -99,6 +120,10 @@ MCP returns the envelope in structured content and JSON text, with `isError=true
 | `idempotency_conflict` | The key already identifies a different request. Recover the original request or use a new key for genuinely new work. |
 | `dependency_cycle` / `dependency_limit` | Change the task boundaries/dependencies; do not retry unchanged forever. |
 | `kind_conflict` | Choose a separate key for state vs artifact. |
+| `actor_mismatch` / `forbidden` / `admin_required` | Use the correct instance/project or operator credential; do not spoof actor labels. |
+| `assignment_mismatch` / `selection_mismatch` | Read the current role; use its assigned instance and acknowledge the exact model/parameters. |
+| `unsupported_model` / `unsupported_parameters` / `capability_mismatch` | Correct the role or operator-configured catalogue; no automatic fallback occurs. |
+| `model_mismatch` | Inspect runtime model evidence before retrying; no outputs were published. |
 | `busy` / `storage_error` / `transport_error` | Outcome may be unknown. Retry the exact original ID and payload with bounded backoff; inspect service health. |
 
 Persist mutation request IDs and payloads before sending when you need recovery across **client** restarts. RelayFence persists the server receipt; it cannot recover a caller's forgotten request ID. A new UUID on every network retry defeats idempotency.

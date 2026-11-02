@@ -75,9 +75,8 @@ def test_independent_process_races_have_one_committed_effect(ledger, operation):
 
 
 class CrashDuringCommit(Store):
-    @staticmethod
-    def _event(db, request, now, kind, subject, details):
-        Store._event(db, request, now, kind, subject, details)
+    def _event(self, db, request, now, kind, subject, details):
+        Store._event(self, db, request, now, kind, subject, details)
         os._exit(23)  # Actual abrupt process loss after writes, before receipt/COMMIT.
 
 

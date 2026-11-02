@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import os
@@ -72,6 +73,12 @@ def test_connector_configs_use_absolute_paths_and_no_token_values(tmp_path, caps
     assert codex["mcp_servers"]["relayfence"]["args"][-1] == str(path.resolve())
     zcode = json.loads(connector_config("zcode", "http://127.0.0.1:7433", path))
     assert zcode["mcp"]["servers"]["relayfence"]["args"][-1] == str(path.resolve())
+    opencode = json.loads(connector_config("opencode", "http://127.0.0.1:7433", path))
+    server = opencode["mcp"]["servers"]["relayfence"]
+    assert opencode["$schema"] == "https://opencode.ai/config.json"
+    assert server["type"] == "local"
+    assert Path(server["command"][0]).is_absolute()
+    assert server["command"][-1] == str(path.resolve())
     dsh = connector_config("dsh", "http://127.0.0.1:7433", path)
     assert "transport: stdio" in dsh and "@deepseek-ai/dsh-mcp-client" in dsh
     assert main(["config", "codex", "--token-file", str(path)]) == 0
@@ -130,3 +137,96 @@ def test_client_handles_unknown_network_outcome_and_error_envelopes():
         )
         with pytest.raises(CoordinationError, match="Stop"):
             client.call("task_get", task_id="x")
+
+
+@pytest.mark.parametrize(
+    "status,body",
+    [
+        (200, {"ok": True}),
+        (500, {"ok": True, "data": {}}),
+        (200, {"ok": False, "error": {"code": "no", "message": "bad"}}),
+        (409, {"ok": False}),
+        (409, {"ok": False, "error": {"code": 42, "message": "bad"}}),
+        (409, {"ok": False, "error": {"code": "bad", "message": "bad", "details": []}}),
+    ],
+)
+def test_malformed_reply_is_unknown_outcome_for_both_transports(status, body):
+    attempts = []
+
+    def response(request):
+        attempts.append(json.loads(request.content))
+        return httpx.Response(status, json=body)
+
+    payload = {"request_id": "keep-this-id", "task_id": "work"}
+    with RelayFenceClient("http://localhost:7433", "t" * 40) as client:
+        peer = client.async_peer(timeout=1)
+        client.http.close()
+        client.http = httpx.Client(transport=httpx.MockTransport(response), base_url=client.url)
+        with pytest.raises(CoordinationError, match="SAME request_id"):
+            client.call("task_complete", **payload)
+
+        async def scenario():
+            await peer.http.aclose()
+            peer.http = httpx.AsyncClient(
+                transport=httpx.MockTransport(response), base_url=client.url
+            )
+            async with peer:
+                with pytest.raises(CoordinationError, match="SAME request_id"):
+                    await peer.call("task_complete", **payload)
+
+        asyncio.run(scenario())
+    assert attempts == [payload, payload], "Neither transport may silently repeat a mutation"
+
+
+def test_chunked_response_size_limit_closes_transport(tmp_path, monkeypatch):
+    from relayfence import client as transport
+
+    monkeypatch.setattr(transport, "MAX_RESPONSE_BYTES", 100)
+    closed = []
+
+    class Stream(httpx.SyncByteStream):
+        def __iter__(self):
+            for _ in range(20):
+                yield b" " * 65_536
+
+        def close(self):
+            closed.append(True)
+
+    with RelayFenceClient("http://localhost:7433", "t" * 40) as client:
+        client.http.close()
+        client.http = httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=Stream())),
+            base_url=client.url,
+        )
+        with pytest.raises(CoordinationError, match="SAME request_id"):
+            client.call("items_list")
+    assert closed == [True]
+
+
+def test_async_control_deadline_includes_slowly_arriving_response_body():
+    cancelled = []
+
+    class Trickle(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            while True:
+                await asyncio.sleep(0.01)
+                yield b" "
+
+        async def aclose(self):
+            cancelled.append(True)
+
+    async def scenario():
+        with RelayFenceClient("http://localhost:7433", "t" * 40) as client:
+            async with client.async_peer(timeout=0.1) as peer:
+                await peer.http.aclose()
+                peer.http = httpx.AsyncClient(
+                    transport=httpx.MockTransport(
+                        lambda request: httpx.Response(200, stream=Trickle())
+                    ),
+                    base_url=client.url,
+                )
+                with pytest.raises(CoordinationError, match="SAME request_id"):
+                    await asyncio.wait_for(peer.call("task_heartbeat"), timeout=1)
+        assert cancelled == [True]
+
+    asyncio.run(scenario())

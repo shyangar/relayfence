@@ -6,6 +6,7 @@ import sqlite3
 from pydantic import ValidationError
 
 from .errors import CoordinationError
+from .identity import ADMIN, Principal
 from .models import OPERATIONS
 from .store import Store
 
@@ -16,12 +17,12 @@ class Service:
     def __init__(self, store: Store):
         self.store = store
 
-    def call(self, operation: str, payload: dict) -> tuple[dict, int]:
+    def call(self, operation: str, payload: dict, principal: Principal = ADMIN) -> tuple[dict, int]:
         try:
             if operation not in OPERATIONS:
                 raise CoordinationError("unknown_operation", "Unknown operation", status=404)
             request = OPERATIONS[operation][0].model_validate(payload)
-            return self.store.execute(operation, request), 200
+            return self.store.execute(operation, request, principal), 200
         except ValidationError as exc:
             error = CoordinationError(
                 "invalid_request",
