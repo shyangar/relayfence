@@ -287,17 +287,25 @@ def test_unresponsive_http_does_not_block_process_monitor(process_tree, cause):
         thread.join(timeout=5)
 
 
-@pytest.mark.parametrize("stream,size", [("stderr", 1_048_577), ("events", 8_388_609)])
+@pytest.mark.parametrize(
+    "stream,size",
+    [
+        ("stderr", 1_048_577),
+        ("events", 8_388_609),
+        ("opencode-events", 8_388_609),
+    ],
+)
 def test_final_output_limits_are_checked_after_fast_exit(tmp_path, stream, size):
     async def heartbeat():
         pass
 
+    events_file = "opencode-events.jsonl" if stream == "opencode-events" else "codex-events.jsonl"
     code = (
         "import os,sys\nfrom pathlib import Path\n"
         + (
             f"sys.stderr.write('x'*{size})\n"
             if stream == "stderr"
-            else f"Path(os.environ['RELAYFENCE_RUN_DIRECTORY'],'codex-events.jsonl').write_bytes(b'x'*{size})\n"
+            else f"Path(os.environ['RELAYFENCE_RUN_DIRECTORY'],{events_file!r}).write_bytes(b'x'*{size})\n"
         )
         + f"print({json.dumps(RESULT)!r})\n"
     )

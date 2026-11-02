@@ -5,6 +5,7 @@ import secrets
 
 from .errors import CoordinationError
 from .models import Mutation
+from .skill_catalogue import validate_skill_names, validate_skill_selection
 
 
 class Registry:
@@ -21,11 +22,34 @@ class Registry:
 
     @staticmethod
     def _registry_view(row):
+        definition = json.loads(row["definition"])
+        selection = definition.get("selection")
+        if isinstance(selection, dict) and selection.get("mcp_servers") is None:
+            selection.pop("mcp_servers", None)
+        # Copy rather than mutate: callers compare the stored selection exactly.
+        if isinstance(selection, dict) and not selection.get("skills"):
+            definition["selection"] = {
+                key: value for key, value in selection.items() if key != "skills"
+            }
         return {
-            **json.loads(row["definition"]),
+            **definition,
             "revision": row["revision"],
             "updated_at": row["updated_at"],
         }
+
+    @staticmethod
+    def _acknowledged(selection):
+        """Shape a submitted selection like a stored one before comparing them.
+
+        An empty skill list is omitted from stored selections, so an older worker
+        that acknowledges only the model and parameters still matches.
+        """
+        value = selection.model_dump()
+        if value.get("mcp_servers") is None:
+            value.pop("mcp_servers", None)
+        if not value.get("skills"):
+            value.pop("skills", None)
+        return value
 
     def _authorize(self, db, operation, request, principal):
         if principal.admin:
@@ -53,6 +77,12 @@ class Registry:
             raise CoordinationError(
                 "forbidden", "Credential belongs to another project", status=403
             )
+        if operation == "team_groups_list":
+            raise CoordinationError(
+                "admin_required",
+                "Listing groups from every project needs the admin credential",
+                status=403,
+            )
         if isinstance(request, Mutation):
             if request.actor != row["agent_id"]:
                 raise CoordinationError(
@@ -67,6 +97,8 @@ class Registry:
                 "task_complete",
                 "task_fail",
                 "runner_heartbeat",
+                "task_activity",
+                "task_question",
             }:
                 raise CoordinationError(
                     "admin_required", "This operation needs the admin token", status=403
@@ -171,6 +203,10 @@ class Registry:
             raise CoordinationError(
                 "capability_mismatch", "Agent lacks required capabilities", {"missing": missing}
             )
+        # Skills are resolved against this machine, so a selection that named a skill
+        # which has since been uninstalled is rejected instead of silently dropping it.
+        if selection.get("skills"):
+            validate_skill_selection(selection["skills"])
         model = selection["model"]
         parameters = selection["parameters"]
         if model is None:
@@ -193,7 +229,19 @@ class Registry:
 
     def _role_put(self, db, r, now):
         agent = self._registry_view(self._registry_row(db, "agents", r.project, r.agent_id))
-        self._validate_binding(agent, r.selection.model_dump(), r.required_capabilities)
+        selection = r.selection.model_dump()
+        self._validate_binding(agent, selection, r.required_capabilities)
+        from .mcp_catalogue import validate_mcp_selection
+
+        validate_mcp_selection(
+            agent.get("runtime"), selection.get("mcp_servers"), self.skill_workspace(r.project)
+        )
+        if selection.get("skills"):
+            workspace = self.skill_workspace(r.project)
+            # Saving a role happens after a project is connected, so project-scoped
+            # skills can be checked here even though the ledger itself cannot see
+            # the workspace at claim time.
+            validate_skill_names(agent.get("runtime"), selection["skills"], workspace)
         return self._registry_put(db, r, now, "roles", r.role_id)
 
     def _claim_execution(self, db, r, row):
@@ -213,7 +261,7 @@ class Registry:
                 403,
             )
         self._validate_binding(agent, role["selection"], role["required_capabilities"])
-        if r.selection is None or r.selection.model_dump() != role["selection"]:
+        if r.selection is None or self._acknowledged(r.selection) != role["selection"]:
             raise CoordinationError(
                 "selection_mismatch",
                 "Acknowledge the role's exact model and parameters before claiming",

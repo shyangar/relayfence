@@ -73,6 +73,12 @@ def test_connector_configs_use_absolute_paths_and_no_token_values(tmp_path, caps
     assert codex["mcp_servers"]["relayfence"]["args"][-1] == str(path.resolve())
     zcode = json.loads(connector_config("zcode", "http://127.0.0.1:7433", path))
     assert zcode["mcp"]["servers"]["relayfence"]["args"][-1] == str(path.resolve())
+    opencode = json.loads(connector_config("opencode", "http://127.0.0.1:7433", path))
+    server = opencode["mcp"]["servers"]["relayfence"]
+    assert opencode["$schema"] == "https://opencode.ai/config.json"
+    assert server["type"] == "local"
+    assert Path(server["command"][0]).is_absolute()
+    assert server["command"][-1] == str(path.resolve())
     dsh = connector_config("dsh", "http://127.0.0.1:7433", path)
     assert "transport: stdio" in dsh and "@deepseek-ai/dsh-mcp-client" in dsh
     assert main(["config", "codex", "--token-file", str(path)]) == 0

@@ -13,6 +13,25 @@ from .errors import CoordinationError
 from .store import Store
 
 
+def default_state_directory() -> Path:
+    """Keep private state outside connected projects.
+
+    Existing installations that already have ``.relayfence`` keep using it, so
+    the default only changes for new installations. A project that contains the
+    state directory is refused at connect time (see LocalWorkspaceManager).
+    """
+    legacy = Path(".relayfence")
+    if legacy.exists():
+        return legacy
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
+    return base / "relayfence"
+
+
 def init_directory(directory: Path) -> Path:
     directory = directory.resolve()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -60,6 +79,22 @@ def connector_config(client: str, url: str, token_file: Path) -> str:
         return json.dumps(
             {"mcp": {"servers": {"relayfence": {"command": command, "args": args}}}}, indent=2
         )
+    if client == "opencode":
+        # OpenCode V2 nests local servers under mcp.servers and takes one argv array.
+        return json.dumps(
+            {
+                "$schema": "https://opencode.ai/config.json",
+                "mcp": {
+                    "servers": {
+                        "relayfence": {
+                            "type": "local",
+                            "command": [command, *args],
+                        }
+                    }
+                },
+            },
+            indent=2,
+        )
     return "\n".join(
         [
             "- id: mcp-relayfence",
@@ -80,13 +115,33 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
+    state_directory = default_state_directory()
+    token_default = state_directory / "access.token"
     init = sub.add_parser("init", help="Create a local ledger and access token (never overwrites)")
-    init.add_argument("--directory", type=Path, default=Path(".relayfence"))
+    init.add_argument("--directory", type=Path, default=state_directory)
     serve = sub.add_parser("serve", help="Serve MCP, HTTP and the coordination console on loopback")
-    serve.add_argument("--directory", type=Path, default=Path(".relayfence"))
+    serve.add_argument("--directory", type=Path, default=state_directory)
     serve.add_argument("--host", choices=["127.0.0.1", "::1"], default="127.0.0.1")
     serve.add_argument("--port", type=int, default=7433)
     serve.add_argument("--token-file", type=Path)
+    serve.add_argument(
+        "--max-parallel",
+        type=int,
+        choices=range(1, 17),
+        default=2,
+        help="Maximum concurrent local executions across all connected projects (default: 2)",
+    )
+    serve.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Print the local office URL without opening a browser",
+    )
+    serve.add_argument(
+        "--permission-mode",
+        choices=["read-only", "workspace-write", "danger-full-access"],
+        default="workspace-write",
+        help="Permissions for automatically connected local agents",
+    )
     serve.add_argument(
         "--dispatcher",
         type=Path,
@@ -113,30 +168,34 @@ def main(argv=None) -> int:
     setup.add_argument("--agent", default="codex-worker")
     setup.add_argument("--project", default="default")
     setup.add_argument("--executable", default="codex")
-    setup.add_argument("--sandbox", choices=["read-only", "workspace-write"], default="read-only")
+    setup.add_argument(
+        "--sandbox",
+        choices=["read-only", "workspace-write", "danger-full-access"],
+        default="read-only",
+    )
     setup.add_argument(
         "--effort", choices=["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
     )
     setup.add_argument("--url", default="http://127.0.0.1:7433")
-    setup.add_argument("--token-file", type=Path, default=Path(".relayfence/access.token"))
+    setup.add_argument("--token-file", type=Path, default=token_default)
     bridge = sub.add_parser(
         "bridge", help="Expose stdio MCP tools backed by an existing shared HTTP service"
     )
     bridge.add_argument("--url", default="http://127.0.0.1:7433")
-    bridge.add_argument("--token-file", type=Path, default=Path(".relayfence/access.token"))
+    bridge.add_argument("--token-file", type=Path, default=token_default)
     config = sub.add_parser(
         "config", help="Print a client config snippet; does not modify client settings"
     )
-    config.add_argument("client", choices=["codex", "zcode", "dsh"])
+    config.add_argument("client", choices=["codex", "opencode", "zcode", "dsh"])
     config.add_argument("--url", default="http://127.0.0.1:7433")
-    config.add_argument("--token-file", type=Path, default=Path(".relayfence/access.token"))
+    config.add_argument("--token-file", type=Path, default=token_default)
     call = sub.add_parser(
         "call", help="Call the public HTTP API with a JSON payload file, or '-' for stdin"
     )
     call.add_argument("operation")
     call.add_argument("payload")
     call.add_argument("--url", default="http://127.0.0.1:7433")
-    call.add_argument("--token-file", type=Path, default=Path(".relayfence/access.token"))
+    call.add_argument("--token-file", type=Path, default=token_default)
     worker = sub.add_parser(
         "worker", help="Run one assigned task using an explicit local command adapter"
     )
@@ -156,7 +215,7 @@ def main(argv=None) -> int:
         "backup", help="Create an online consistent backup; destination must be new"
     )
     backup.add_argument("destination", type=Path)
-    backup.add_argument("--directory", type=Path, default=Path(".relayfence"))
+    backup.add_argument("--directory", type=Path, default=state_directory)
     demo = sub.add_parser(
         "demo", help="Run real MCP clients through races, stale inputs, takeover and restart"
     )
@@ -175,13 +234,52 @@ def main(argv=None) -> int:
         elif args.command == "serve":
             import uvicorn
 
+            from .local_workspace import LocalWorkspaceManager
             from .server import create_app
+            from .service import Service
 
             if not 1 <= args.port <= 65535:
                 raise ValueError("Port must be between 1 and 65535")
+            init_directory(args.directory)
             token = read_token(args.token_file or args.directory / "access.token")
             store = Store(args.directory / "ledger.sqlite3")
-            app = create_app(store, token)
+            url = (
+                f"http://[::1]:{args.port}"
+                if args.host == "::1"
+                else f"http://{args.host}:{args.port}"
+            )
+            office_url = url + "/"
+            manager = LocalWorkspaceManager(
+                Service(store),
+                url,
+                args.directory / "local",
+                permission_mode=args.permission_mode,
+                state_root=args.directory,
+                max_parallel=args.max_parallel,
+            )
+
+            def ready():
+                print(
+                    "Open your local office (no token or pairing link needed):",
+                    flush=True,
+                )
+                print(office_url, flush=True)
+                if not args.no_browser:
+                    import threading
+                    import webbrowser
+
+                    # The ASGI lifespan completes before the HTTP listener is ready.
+                    timer = threading.Timer(1, lambda: webbrowser.open(office_url))
+                    timer.daemon = True
+                    timer.start()
+
+            app = create_app(
+                store,
+                token,
+                local_ui=True,
+                workspace_manager=manager,
+                on_ready=ready,
+            )
             if args.dispatcher:
                 import threading
 

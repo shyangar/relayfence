@@ -15,11 +15,19 @@ RelayFence puts these handoffs through a small, transactional coordination servi
 
 ![RelayFence console with a stale artifact and task history](docs/assets/console.png)
 
+## AI office preview
+
+The home page is now a game-style office: software groups, configurable people and desks, a meeting room that creates real tasks, and a sourced quota screen. The previous console remains at `/console`. The preview distinguishes independent sessions from native subagents and provides explicit checkpoint-based handoff; continuous quota detection and unattended failover are not yet implemented. See [the office guide and capability boundaries](docs/office.md).
+
+Project business data, the local project picker, durable events, member guidance and per-group logs share the project's SQLite ledger. The **团队管理** view aggregates groups from every local project, supports rename/delete/create, and imports an existing group from another project into the current office. The log view pages newest-first and summarises levels, event kinds, members, groups and task outcomes without changing task state. Private worker configuration and credential files remain separate, permission-restricted inputs for the local dispatcher.
+
+![AI office browser integration fixture; unbound desks are configuration drafts](docs/assets/office.png)
+
 ## Manage and run tasks
 
 Create and edit tasks with priorities, due dates, roles and prerequisite tasks. Filter by status or search, inspect artifacts/history, and pause, resume, cancel or retry from the console. Missing inputs and unfinished prerequisites show as **blocked**.
 
-The local dispatcher starts ready work by priority, then due date. It waits for dependencies, serializes work in the same workspace and records failures for an explicit retry. The built-in Codex adapter uses your installed, authenticated CLI and selected model; no desktop chat is needed. Start with [the setup and task-management guide](docs/task-management.md).
+The local dispatcher starts ready work by priority, then due date. Dispatcher slots can run different workspaces concurrently. Tasks sharing a checkout hold an exclusive worker lock; use separate worktrees for parallel file editing. Meeting task dependencies are validated before dispatch. The built-in Codex and OpenCode adapters use your installed, authenticated CLI and selected model; no desktop chat is needed. Start with [the setup and task-management guide](docs/task-management.md).
 
 Lease requests run independently of local execution monitoring. Windows uses a gated Job Object to own descendants; Linux/macOS use process groups. Polling uses reusable asynchronous connections, per-identity deadlines and failure backoff. See [process ownership and control traffic](docs/process-lifecycle.md) for the exact behavior and platform limits.
 
@@ -46,7 +54,7 @@ These guarantees apply to the ledger. External file writes, merges, deployments 
 
 In the console, register an **agent instance**, configure its available model IDs and parameter options, then issue its own credential. Create a **role** with instructions and deliverables, select the instance, select a model, and assign tasks to that role. The same software can have multiple instances with different models.
 
-External MCP sessions configure their models in their own client; RelayFence does not switch external conversations. The optional `relayfence worker` command passes the selected model to an operator-configured local adapter and renews the task lease while it runs. Model catalogues are manually configured, and model reports remain explicitly unverified or worker-reported. The built-in Codex adapter runs an installed CLI without a desktop window. Other tools can use a configured command adapter or external MCP sessions.
+External MCP sessions configure their models in their own client; RelayFence does not switch external conversations. The optional `relayfence worker` command passes the selected model to an operator-configured local adapter and renews the task lease while it runs. Model catalogues are manually configured, and model reports remain explicitly unverified or worker-reported. The built-in Codex and OpenCode adapters run an installed CLI without a desktop window. Other tools can use a configured command adapter or external MCP sessions.
 
 Run a real HTTP/subprocess handoff with two **demo model labels** and no LLM calls:
 
@@ -80,21 +88,23 @@ The demo launches a real server process and three MCP protocol clients. It races
 [PASS] crash-recovery
 ~~~
 
-Each run writes a report and persistent ledger into a new `.relayfence/demo-*` directory. The final command printed by the demo lets you reopen it in the console. **These are real protocol clients, not live Codex, ZCode or DSH sessions.**
+Each run writes a report and persistent ledger into a new `.relayfence/demo-*` directory. The final command printed by the demo lets you reopen it in the console. **These are real protocol clients, not live Codex, OpenCode, ZCode or DSH sessions.**
 
 ## Start a shared workspace
 
 ~~~bash
-uv run relayfence init
 uv run relayfence serve
 ~~~
 
-Keep the server running. The console is at **http://127.0.0.1:7433/** and MCP is at **http://127.0.0.1:7433/mcp**. Open the local `.relayfence/access.token` file and paste its value into the console. The console keeps it only in tab memory.
+Keep the server running. First launch initializes local storage and opens the local office URL. Select an existing project directory in the office; installed agents, providers and models are discovered and local runners are configured automatically. No manual token or executor setup is needed in the office. Discovery does not guarantee remaining account quota; OpenCode's **free** marker only means its local catalogue reports zero input/output prices.
+
+The office is at **http://127.0.0.1:7433/** and MCP is at **http://127.0.0.1:7433/mcp**. Open the local office URL directly; no token or expiring pairing link is needed. `--no-browser` prints the URL without opening a browser. Automatic runners default to `workspace-write`; full access requires `--permission-mode danger-full-access`. Switch projects while existing work continues in its own project context. Advanced API/MCP clients still use `access.token` in the state directory (platform application data by default, or an existing `.relayfence`); the legacy console is at `/console`.
 
 From a second terminal, print the appropriate client configuration:
 
 ~~~bash
 uv run relayfence config codex
+uv run relayfence config opencode
 uv run relayfence config zcode
 uv run relayfence config dsh
 ~~~
@@ -107,7 +117,7 @@ The generated snippets use absolute paths and a stdio bridge to **the same runni
 
 ~~~mermaid
 flowchart LR
-  A[Codex / ZCode / DSH] -->|MCP or stdio bridge| R[RelayFence]
+  A[Codex / OpenCode / ZCode / DSH] -->|MCP or stdio bridge| R[RelayFence]
   P[Python / HTTP clients] --> R
   R --> L[(SQLite ledger)]
   R --> C[Roles, models and work console]

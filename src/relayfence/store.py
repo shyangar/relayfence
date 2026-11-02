@@ -14,14 +14,25 @@ from contextlib import contextmanager
 from importlib.resources import files
 from pathlib import Path
 
+from .decisions import Decisions
+from .delivery import Delivery
 from .errors import CoordinationError
 from .identity import ADMIN, Principal
-from .models import Mutation, Request
+from .meetings import Meetings
+from .models import OPERATIONS, Mutation, Request
+from .office import Office
+from .project_overview import ProjectOverview
 from .registry import Registry
+from .skills import SkillView
+from .storage import GroupLogs
 from .task_management import TaskManagement
 
 MAX_PAYLOAD_BYTES = 131_072
 MAX_GRAPH_NODES = 256
+MAX_LIST_BYTES = 8_388_608
+# These key spaces are written by task/meeting internals. Allowing a state_put
+# to create them would squat a version and make the internal write fail later.
+RESERVED_ITEM_PREFIXES = ("tasks/", "meetings/")
 
 
 def encode(value) -> str:
@@ -34,13 +45,24 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-class Store(Registry, TaskManagement):
+class Store(
+    Registry,
+    TaskManagement,
+    Office,
+    Meetings,
+    GroupLogs,
+    SkillView,
+    Decisions,
+    Delivery,
+    ProjectOverview,
+):
     encode = staticmethod(encode)
     digest = staticmethod(digest)
 
     def __init__(self, path: str | Path, clock: Callable[[], float] = time.time):
         self.path = Path(path).resolve()
         self.clock = clock
+        SkillView.__init__(self)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:
             db.execute("PRAGMA journal_mode=WAL")
@@ -48,12 +70,21 @@ class Store(Registry, TaskManagement):
             db.execute("BEGIN IMMEDIATE")
             try:
                 version = db.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1, 2, 3):
-                    raise RuntimeError(f"Unsupported database schema {version}; expected 3")
+                if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12):
+                    raise RuntimeError(f"Unsupported database schema {version}; expected 12")
                 scripts = (
                     (["schema.sql"] if version == 0 else [])
                     + (["migration_2.sql"] if version < 2 else [])
                     + (["migration_3.sql"] if version < 3 else [])
+                    + (["migration_4.sql"] if version < 4 else [])
+                    + (["migration_5.sql"] if version < 5 else [])
+                    + (["migration_6.sql"] if version < 6 else [])
+                    + (["migration_7.sql"] if version < 7 else [])
+                    + (["migration_8.sql"] if version < 8 else [])
+                    + (["migration_9.sql"] if version < 9 else [])
+                    + (["migration_10.sql"] if version < 10 else [])
+                    + (["migration_11.sql"] if version < 11 else [])
+                    + (["migration_12.sql"] if version < 12 else [])
                 )
                 for name in scripts:
                     sql = files("relayfence").joinpath(name).read_text(encoding="utf-8")
@@ -78,18 +109,50 @@ class Store(Registry, TaskManagement):
 
     def execute(self, operation: str, request: Request, principal: Principal = ADMIN) -> dict:
         payload = request.model_dump(mode="json")
+        if operation == "office_dispatch" and payload.get("leader_id") is None:
+            payload.pop("leader_id", None)
+            payload.pop("mode", None)
         # Preserve v0.1 receipt hashes when the newly optional fields are absent.
         for field in {
             "task_create": ["role_id"],
             "task_claim": ["selection"],
             "task_complete": ["reported_model"],
+            "task_update": ["review_required"],
         }.get(operation, []):
             if payload.get(field) is None:
                 payload.pop(field, None)
+        if operation == "office_dispatch" and not payload.get("review_required"):
+            payload.pop("review_required", None)
         if operation == "task_create":
-            for field, default in {"priority": 1, "due_at": None, "depends_on": []}.items():
+            for field, default in {
+                "priority": 1,
+                "due_at": None,
+                "depends_on": [],
+                "review_required": False,
+            }.items():
                 if payload.get(field) == default:
                     payload.pop(field, None)
+        # An empty skill selection must hash exactly like a pre-skill request, so
+        # existing receipts still replay instead of reporting an idempotency conflict.
+        selection = payload.get("selection")
+        if isinstance(selection, dict) and not selection.get("skills"):
+            selection.pop("skills", None)
+        if isinstance(selection, dict) and selection.get("mcp_servers") is None:
+            selection.pop("mcp_servers", None)
+        if operation == "office_dispatch" and payload.get("member_overrides"):
+            # Absent MCP means keep the member default; explicit null means
+            # inherit runtime configuration. Their receipts must stay distinct.
+            payload["member_overrides"] = {
+                key: value.model_dump(mode="json", exclude_unset=True)
+                for key, value in request.member_overrides.items()
+            }
+        if operation == "office_dispatch" and not payload.get("member_overrides"):
+            payload.pop("member_overrides", None)
+        if operation == "office_put":
+            for group in payload.get("groups", []):
+                for member in group.get("members", []):
+                    if member.get("mcp_servers") is None:
+                        member.pop("mcp_servers", None)
         raw = encode({"operation": operation, "request": payload})
         if len(raw.encode("utf-8")) > MAX_PAYLOAD_BYTES:
             raise CoordinationError("payload_too_large", "Request exceeds 128 KiB", status=413)
@@ -138,8 +201,7 @@ class Store(Registry, TaskManagement):
                 db.rollback()
                 raise
 
-    @staticmethod
-    def _event(db, r, now, kind, subject, details):
+    def _event(self, db, r, now, kind, subject, details):
         db.execute(
             "INSERT INTO events(project,actor,kind,subject,details,created_at) VALUES (?,?,?,?,?,?)",
             (
@@ -151,6 +213,10 @@ class Store(Registry, TaskManagement):
                 now,
             ),
         )
+        # Task events are mirrored into the owning group's durable log.  The
+        # event ledger remains the source of truth; the group log is an indexed
+        # projection for pagination and analysis.
+        self.record_event(db, r.project, kind, subject, details, now)
 
     @staticmethod
     def _head(db, project, key):
@@ -179,8 +245,21 @@ class Store(Registry, TaskManagement):
 
     @staticmethod
     def _write_item(db, r, now, key, kind, version, value, dependencies):
+        existing = db.execute(
+            "SELECT 1 FROM revisions WHERE project=? AND key=? AND version=?",
+            (r.project, key, version),
+        ).fetchone()
+        if existing:
+            raise CoordinationError(
+                "state_conflict",
+                "This key version already exists; read the current version first",
+                {"key": key, "version": version},
+                409,
+            )
         db.execute(
-            "INSERT INTO items VALUES (?,?,?,?) ON CONFLICT(project,key) DO UPDATE SET version=excluded.version",
+            "INSERT INTO items VALUES (?,?,?,?) ON CONFLICT(project,key) DO UPDATE SET "
+            "version=CASE WHEN excluded.version>items.version THEN excluded.version "
+            "ELSE items.version END",
             (r.project, key, kind, version),
         )
         db.execute(
@@ -261,7 +340,26 @@ class Store(Registry, TaskManagement):
             **freshness,
         }
 
+    def _capabilities(self, db, r, now):
+        """Report the operations this process actually loaded.
+
+        Static assets are re-read from disk on every request while Python modules
+        load once per process, so a browser can be newer than the server. Answering
+        from the live registry lets newer assets degrade instead of failing.
+        """
+        return {
+            "operations": sorted(OPERATIONS),
+            "schema": db.execute("PRAGMA user_version").fetchone()[0],
+        }
+
     def _state_put(self, db, r, now):
+        if any(r.key.startswith(prefix) for prefix in RESERVED_ITEM_PREFIXES):
+            raise CoordinationError(
+                "reserved_key",
+                "This key is managed by RelayFence task or meeting internals",
+                {"key": r.key},
+                422,
+            )
         version = self._check_version(db, r.project, r.key, r.expected_version, "state")
         self._write_item(db, r, now, r.key, "state", version, r.value, [])
         self._event(db, r, now, "state.updated", r.key, {"version": version})
@@ -275,9 +373,17 @@ class Store(Registry, TaskManagement):
             "SELECT key FROM items WHERE project=? AND key>? ORDER BY key LIMIT ?",
             (r.project, r.after, r.limit + 1),
         ).fetchall()
+        items, size = [], 0
+        for row in rows[: r.limit]:
+            item = self._item(db, r.project, row["key"])
+            encoded = len(encode(item).encode("utf-8"))
+            if items and size + encoded > MAX_LIST_BYTES:
+                break
+            items.append(item)
+            size += encoded
         return {
-            "items": [self._item(db, r.project, row["key"]) for row in rows[: r.limit]],
-            "next_cursor": rows[r.limit - 1]["key"] if len(rows) > r.limit else None,
+            "items": items,
+            "next_cursor": items[-1]["key"] if len(rows) > len(items) and items else None,
         }
 
     @staticmethod
@@ -297,7 +403,17 @@ class Store(Registry, TaskManagement):
             if changed:
                 freshness = {**freshness, "fresh": False, "stale_tasks": changed}
         blockers = self._task_blockers(db, project, row) if row["status"] == "ready" else []
+        review_required, review = self._review_info(db, project, row)
+        waiting = bool(
+            db.execute(
+                "SELECT 1 FROM decisions WHERE project=? AND task_id=? AND status='pending'",
+                (project, row["task_id"]),
+            ).fetchone()
+        )
         return {
+            "review_required": review_required,
+            "review": review,
+            "attempt_count": row["fence"],
             "task_id": row["task_id"],
             "title": row["title"],
             "description": row["description"],
@@ -321,7 +437,19 @@ class Store(Registry, TaskManagement):
             "task_snapshot": json.loads(row["task_snapshot"]),
             "failure": json.loads(row["failure"]) if row["failure"] else None,
             "blockers": blockers,
-            "display_status": "blocked" if blockers else row["status"],
+            "waiting_user": waiting,
+            "display_status": "waiting_user"
+            if waiting
+            else "awaiting_review"
+            if row["status"] == "done"
+            and review_required
+            and review
+            and review["status"] == "pending"
+            else "lease_expired"
+            if row["status"] == "running" and row["expires_at"] <= now
+            else "blocked"
+            if blockers
+            else row["status"],
         }
 
     def _task_create(self, db, r, now):
@@ -333,6 +461,18 @@ class Store(Registry, TaskManagement):
         ).fetchone():
             raise CoordinationError(
                 "already_exists", "Task ID already exists", {"task_id": r.task_id}
+            )
+        # Deletion keeps the audit trail (including task events and group
+        # conversation). Reusing an ID would silently merge the new task into
+        # that history, so require a fresh one.
+        if db.execute(
+            "SELECT 1 FROM events WHERE project=? AND subject=? AND kind='task.created'",
+            (r.project, r.task_id),
+        ).fetchone():
+            raise CoordinationError(
+                "already_exists",
+                "Task ID has been used before; choose a new ID to keep its history unambiguous",
+                {"task_id": r.task_id},
             )
         db.execute(
             "INSERT INTO tasks(project,task_id,title,description,inputs,status,created_at,updated_at,role_id,priority,due_at,depends_on) VALUES (?,?,?,?,?,'ready',?,?,?,?,?,?)",
@@ -350,6 +490,10 @@ class Store(Registry, TaskManagement):
                 encode(r.depends_on),
             ),
         )
+        db.execute(
+            "INSERT INTO task_policies VALUES (?,?,?)",
+            (r.project, r.task_id, int(r.review_required)),
+        )
         self._event(db, r, now, "task.created", r.task_id, {"inputs": r.inputs})
         return self._task_get(db, r, now)
 
@@ -366,7 +510,14 @@ class Store(Registry, TaskManagement):
         filters = ""
         if r.status:
             filters += " AND status=?"
-            params.append("ready" if r.status == "blocked" else r.status)
+            params.append(
+                {
+                    "blocked": "ready",
+                    "awaiting_review": "done",
+                    "waiting_user": "paused",
+                    "lease_expired": "running",
+                }.get(r.status, r.status)
+            )
         if r.role_id:
             filters += " AND role_id=?"
             params.append(r.role_id)
@@ -380,7 +531,7 @@ class Store(Registry, TaskManagement):
         tasks = []
         for row in rows:
             task = self._task_view(db, r.project, row, now)
-            if r.status in ("ready", "blocked") and task["display_status"] != r.status:
+            if r.status and task["display_status"] != r.status:
                 continue
             tasks.append(task)
             if len(tasks) > r.limit:
@@ -407,11 +558,18 @@ class Store(Registry, TaskManagement):
                 "Another live lease owns this task",
                 {"expires_at": row["expires_at"], "fence": row["fence"]},
             )
-        blockers = [b for b in self._task_blockers(db, r.project, row) if b["kind"] == "task"]
+        # Meeting pauses and task dependencies are prerequisites too. Filtering
+        # to task blockers let a paused meeting keep dispatching its members.
+        # Input blockers keep their specific not_found/stale_input errors below.
+        blockers = [
+            blocker
+            for blocker in self._task_blockers(db, r.project, row)
+            if blocker["kind"] != "input"
+        ]
         if blockers:
             raise CoordinationError(
                 "task_blocked",
-                "Prerequisite tasks are not complete and current",
+                "Prerequisites are not ready",
                 {"blockers": blockers},
             )
         task_snapshot = []
@@ -561,8 +719,19 @@ class Store(Registry, TaskManagement):
             now,
             "task.completed",
             r.task_id,
-            {"fence": r.fence, "outputs": published, "execution": execution},
+            {
+                "fence": r.fence,
+                "outputs": published,
+                "execution": execution,
+                "review_required": self._review_info(db, r.project, row)[0],
+            },
         )
+        required, _ = self._review_info(db, r.project, row)
+        if required:
+            db.execute(
+                "INSERT INTO task_reviews VALUES (?,?,?,'pending',NULL,'','[]',?)",
+                (r.project, r.task_id, r.fence, now),
+            )
         return {
             "task": self._task_get(db, r, now),
             "artifacts": [self._item(db, r.project, o["key"]) for o in published],

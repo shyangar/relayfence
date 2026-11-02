@@ -4,7 +4,7 @@ v0.2 adds configurable **role → agent instance → model/parameters** bindings
 
 ## Configure in the console
 
-1. Start `relayfence serve` and connect at `http://127.0.0.1:7433/` with the admin `access.token`.
+1. Start `relayfence serve` and open the one-time pairing link it prints. For the legacy configuration console, open `http://127.0.0.1:7433/console` and enter the admin `access.token`.
 2. Expand **Agent instances & model catalogues**. Register a unique instance ID, software name, connection mode, capabilities and model IDs. Add allowed parameter values under each model when needed. Save the instance.
 3. Click **Issue / rotate credential** and download its `.token` file to a private directory. Rotation immediately invalidates the previous credential. Use this token for this instance; keep the admin token with the operator.
 4. Under **Role bindings**, enter a role ID, choose the instance, then choose one of its models. Supported parameters appear as dropdowns. Add instructions and deliverables, then save.
@@ -14,7 +14,7 @@ Model catalogues and capabilities are **operator-configured**, not remotely disc
 
 The console uses revision checks to avoid overwriting another editor's changes. On `revision_conflict`, click Edit to reload the current object before making a new change. For a lost response, retry the unchanged form in the same tab: its request ID is retained. The browser does not persist drafts, credentials or pending requests across reloads.
 
-## External sessions: Codex, ZCode, DSH and other MCP clients
+## External sessions: Codex, OpenCode, ZCode, DSH and other MCP clients
 
 Use mode **External session / MCP** for an independently running client. RelayFence can assign work to its credential, but it cannot change that external conversation's model through its coordination tools. Either choose **Use external session settings** (unknown model) or select a required model and configure that model in the client before claiming.
 
@@ -61,7 +61,7 @@ Mode **Local command adapter** supports explicit local execution through `relayf
 relayfence worker --config worker.json --task implement-login --token-file /absolute/private/worker.token --run-directory /absolute/private/run-001
 ~~~
 
-`--run-directory` must be new. Paths in `cwd` are relative to the configuration file. Use absolute executable/script paths. This is an explicit one-task command, not a background dispatcher; the HTTP/MCP server never executes a command stored in the registry. For continuous execution and the built-in Codex adapter, see [task management](task-management.md). Model-list queries remain operator-configured.
+`--run-directory` must be new. Paths in `cwd` are relative to the configuration file. Use absolute executable/script paths. This is an explicit one-task command, not a background dispatcher; the HTTP/MCP server never executes a command stored in the registry. For continuous execution and the built-in Codex and OpenCode adapters, see [task management](task-management.md). Model-list queries remain operator-configured.
 
 The worker:
 
@@ -82,7 +82,7 @@ The adapter must emit **only** one JSON result on stdout. Send diagnostics to st
 
 `reported_model` may be omitted when unknown. If supplied and different from the requested model, completion is rejected. The task records `requested`, `reported_model`, and `model_evidence` (`unverified` or `worker_reported`). A wrapper must not infer the actual model solely from an argument it received; use real runtime metadata or leave the report unknown. This is not provider-attested model verification, and parameters are not independently verified.
 
-The worker is **not a sandbox**. Run trusted adapter code with the appropriate OS permissions and an isolated worktree. Windows uses a gated Job Object; Linux/macOS use a process group. Cleanup also covers ordinary descendants left behind by an exited adapter. Do not detach subprocesses: these controls do not undo external side effects or universally capture processes launched through other services. Command stdout is limited to 128 KiB, stderr to 1 MiB and Codex events to 8 MiB; checks run during execution and after cleanup. These are application thresholds, not OS resource quotas. Lease HTTP requests have separate cancellable deadlines and do not block the local execution monitor. See [process ownership and control traffic](process-lifecycle.md) for platform differences and optional timeout settings.
+The worker is **not a sandbox**. Run trusted adapter code with the appropriate OS permissions and an isolated worktree. Windows uses a gated Job Object; Linux/macOS use a process group. Cleanup also covers ordinary descendants left behind by an exited adapter. Do not detach subprocesses: these controls do not undo external side effects or universally capture processes launched through other services. Command stdout is limited to 128 KiB, stderr to 1 MiB and built-in adapter event logs to 8 MiB; checks run during execution and after cleanup. These are application thresholds, not OS resource quotas. Lease HTTP requests have separate cancellable deadlines and do not block the local execution monitor. See [process ownership and control traffic](process-lifecycle.md) for platform differences and optional timeout settings.
 
 ## Try a complete model-selection handoff without API keys
 

@@ -260,6 +260,54 @@ def test_role_rebinding_does_not_revoke_current_owner(assigned):
     assert next_claim["data"]["task"]["owner"] == "reviewer"
 
 
+def test_claim_accepts_skill_names_resolved_later_in_the_project(ledger, tmp_path):
+    """The ledger cannot see project skill roots at claim time, so it validates shape only."""
+    skill = tmp_path / ".agents" / "skills" / "project-only-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: project-only-skill\ndescription: Project skill\n---\n",
+        encoding="utf-8",
+    )
+    ledger.store.set_skill_workspace(tmp_path)
+    principal, _ = register(ledger)
+    selection = {**SELECTION, "skills": ["project-only-skill"]}
+    ledger.ok(
+        "role_put",
+        role_id="developer",
+        expected_revision=0,
+        label="Developer",
+        agent_id="coder",
+        selection=selection,
+        required_capabilities=["code"],
+        instructions="Implement with tests",
+        deliverables=["Result"],
+    )
+    ledger.ok("task_create", task_id="t", title="Task", role_id="developer")
+
+    result = as_agent(ledger, principal, "task_claim", task_id="t", selection=selection)
+
+    assert result["ok"], result
+    assert result["data"]["task"]["execution"]["requested"]["skills"] == ["project-only-skill"]
+
+
+def test_role_put_rejects_malformed_skill_names(ledger):
+    register(ledger)
+    selection = {**SELECTION, "skills": ["../escape"]}
+
+    ledger.error(
+        "invalid_request",
+        "role_put",
+        role_id="developer",
+        expected_revision=0,
+        label="Developer",
+        agent_id="coder",
+        selection=selection,
+        required_capabilities=["code"],
+        instructions="Implement with tests",
+        deliverables=["Result"],
+    )
+
+
 def test_agent_edit_invalidates_future_claim_until_role_fixed(assigned):
     ledger, principal, _ = assigned
     ledger.ok(
@@ -430,4 +478,4 @@ def test_v1_migration_preserves_fences_null_values_and_receipts(tmp_path):
     with ThreadPoolExecutor(max_workers=3) as pool:
         list(pool.map(lambda _: Store(path), range(3)))
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 12

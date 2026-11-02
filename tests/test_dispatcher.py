@@ -18,7 +18,7 @@ from test_worker import (
 from relayfence.client import RelayFenceClient
 from relayfence.dispatcher import Dispatcher
 from relayfence.errors import CoordinationError
-from relayfence.locking import local_lock
+from relayfence.execution_capacity import ExecutionCapacity
 
 
 @pytest.fixture
@@ -146,11 +146,63 @@ def test_operator_cancel_stops_running_process_and_prevents_publication(dispatch
     assert ledger.ok("items_list")["items"] == []
 
 
-def test_lock_contention_does_not_claim_work_and_expired_work_not_auto_replayed(dispatch_setup):
+def test_member_guidance_interrupts_then_restarts_with_updated_prompt(dispatch_setup):
+    dispatcher, ledger, _ = dispatch_setup
+    worker = dispatcher.workers[0]
+    config = json.loads(worker["path"].read_text())
+    # This real child stays alive until interrupted. The second invocation must
+    # read the revised prompt and publish its contents, proving delivery.
+    Path(config["command"][1]).write_text(
+        "import json,sys,time\n"
+        "from pathlib import Path\n"
+        "r=json.load(sys.stdin)\n"
+        "Path('guidance-started').write_text('running')\n"
+        "if r['task']['description']=='slow': time.sleep(20)\n"
+        "print(json.dumps({'outputs':[{'key':'results/'+r['task']['task_id'],"
+        "'expected_version':0,'value':r['task']['description']}]}))\n"
+    )
+    ledger.ok(
+        "task_update",
+        task_id="t",
+        title="Slow",
+        description="slow",
+        role_id="developer",
+        expected_revision=1,
+    )
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        dispatcher.tick(pool)
+        deadline = time.monotonic() + 8
+        while not (worker["cwd"] / "guidance-started").exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        assert dispatcher.task_running("default", "t")
+        assert dispatcher.interrupt_task("other-project", "t") is None
+        control(ledger, "t", "pause")
+        future = dispatcher.interrupt_task("default", "t")
+        assert future is worker["future"]
+        assert not future.result(timeout=2)["ok"]
+        assert not dispatcher.stop.is_set()
+        assert not dispatcher.task_running("default", "t")
+        assert ledger.ok("items_list")["items"] == []
+        task = ledger.ok("task_get", task_id="t")
+        assert task["status"] == "paused"
+        ledger.ok(
+            "task_update",
+            task_id="t",
+            title=task["title"],
+            description="Use the new user guidance",
+            role_id="developer",
+            expected_revision=task["revision"],
+        )
+        control(ledger, "t", "resume")
+        dispatcher.tick(pool)
+        assert worker["future"].result(timeout=4)["ok"]
+    assert ledger.ok("item_get", key="results/t")["value"] == "Use the new user guidance"
+    assert ledger.ok("task_get", task_id="t")["fence"] >= 2
+
+
+def test_expired_work_not_auto_replayed(dispatch_setup):
     dispatcher, ledger, config = dispatch_setup
-    with local_lock(dispatcher.workers[0]["cwd"] / ".relayfence" / "worker.lock"):
-        dispatcher.run(once=True)
-    assert ledger.ok("task_get", task_id="t")["fence"] == 0
     with dispatcher._client(dispatcher.workers[0]) as client:
         client.call(
             "task_claim",
@@ -172,19 +224,50 @@ def test_shutdown_prevents_launch(dispatch_setup):
     assert ledger.ok("task_get", task_id="t")["fence"] == 0
 
 
-def test_workspace_lock_is_retried_after_its_owner_exits(dispatch_setup):
-    dispatcher, ledger, _ = dispatch_setup
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        with local_lock(dispatcher.workers[0]["cwd"] / ".relayfence" / "worker.lock"):
-            dispatcher.tick(pool)
-            assert dispatcher.workers[0]["future"].result(timeout=3)["code"] == "workspace_busy"
-        dispatcher.tick(pool)
-        assert dispatcher.workers[0]["future"].result(timeout=3)["ok"]
-    assert ledger.ok("task_get", task_id="t")["status"] == "done"
-    assert ledger.ok("task_get", task_id="t")["fence"] == 1
+def test_parallel_slots_run_two_tasks_in_different_workspaces(dispatch_setup, tmp_path):
+    dispatcher, ledger, path = dispatch_setup
+    data = json.loads(dispatcher.workers[0]["path"].read_text())
+    Path(data["command"][1]).write_text(
+        "import json,sys,time\n"
+        "r=json.load(sys.stdin)\n"
+        "time.sleep(1.2)\n"
+        "print(json.dumps({'outputs':[{'key':'results/'+r['task']['task_id'],"
+        "'expected_version':0,'value':'ok'}]}))\n"
+    )
+    cfg = json.loads(path.read_text())
+    cfg["workers"] = cfg["workers"] * 2
+    other_workspace = tmp_path / "isolated"
+    other_workspace.mkdir()
+    other_config = path.parent / "isolated-worker.json"
+    other_config.write_text(json.dumps({**data, "cwd": str(other_workspace)}))
+    cfg["workers"][1] = {**cfg["workers"][1], "config": other_config.name}
+    cfg["max_parallel"] = 2
+    path.write_text(json.dumps(cfg))
+    ledger.ok("task_create", task_id="a", title="A", role_id="developer")
+    ledger.ok("task_create", task_id="b", title="B", role_id="developer")
+    parallel = Dispatcher(path, dispatcher.url)
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        while not all(parallel.workers[index]["future"] is not None for index in (0, 1)):
+            assert time.monotonic() - started < 5
+            parallel.tick(pool)
+            time.sleep(0.02)
+        assert all(parallel.workers[index]["task"]["task_id"] in {"a", "b"} for index in (0, 1))
+        assert {parallel.workers[index]["task"]["task_id"] for index in (0, 1)} == {"a", "b"}
+        for index in (0, 1):
+            assert parallel.workers[index]["future"].result(timeout=5)["ok"]
+    assert time.monotonic() - started < 2.8
+    assert ledger.ok("task_get", task_id="a")["status"] == "done"
+    assert ledger.ok("task_get", task_id="b")["status"] == "done"
+    claims = [
+        event["subject"]
+        for event in ledger.ok("events_list", limit=200)["events"]
+        if event["kind"] == "task.claimed"
+    ]
+    assert sorted(claims) == ["a", "b"]
 
 
-def test_priority_applies_across_agents_with_shared_workspace(dispatch_setup, monkeypatch):
+def test_parallel_agents_share_workspace_without_duplicate_claims(dispatch_setup, monkeypatch):
     original, ledger, path = dispatch_setup
     principal, token = register(ledger, agent_id="reviewer", mode="command")
     bind(ledger, role_id="review", agent_id="reviewer")
@@ -220,7 +303,7 @@ def test_priority_applies_across_agents_with_shared_workspace(dispatch_setup, mo
         for e in ledger.ok("events_list", limit=200)["events"]
         if e["kind"] == "task.claimed"
     ]
-    assert claims == ["urgent-review", "t"]
+    assert sorted(claims) == ["t", "urgent-review"]
 
 
 def test_dispatcher_continues_after_connection_failure(dispatch_setup, monkeypatch):
@@ -261,13 +344,226 @@ def test_one_unavailable_agent_does_not_block_other_agents(dispatch_setup, monke
     assert dispatcher.worker_health["default/offline"]["code"] == "unauthorized"
 
 
-@pytest.mark.parametrize("change", ["duplicate", "missing-cwd", "bad-token", "invalid"])
+def test_dispatcher_accepts_multiple_slots_for_one_provider(dispatch_setup):
+    _, _, path = dispatch_setup
+    config = json.loads(path.read_text())
+    config["workers"] = config["workers"] * 3
+    config["max_parallel"] = 3
+    path.write_text(json.dumps(config))
+    dispatcher = Dispatcher(path, "http://127.0.0.1:7433", threading.Event())
+    assert len(dispatcher.workers) == 3
+    assert {worker["config"].agent_id for worker in dispatcher.workers} == {"coder"}
+
+
+def test_duplicate_provider_slots_poll_once(dispatch_setup, monkeypatch):
+    dispatcher, _, _ = dispatch_setup
+    original = dispatcher.workers[0]
+    dispatcher.workers.extend([{**original}, {**original}])
+    probes = []
+
+    async def candidate(worker, busy):
+        probes.append(worker)
+        return None
+
+    monkeypatch.setattr(dispatcher, "_candidate", candidate)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        dispatcher.tick(pool)
+    assert len(probes) == 1
+    assert dispatcher.health()["status"] == "healthy"
+    dispatcher._last_poll_at = time.monotonic() - 60
+    assert dispatcher.health()["status"] == "stale"
+    dispatcher._last_poll_at = time.monotonic()
+    dispatcher.worker_health["default/coder"] = {"ok": False, "code": "unauthorized"}
+    assert dispatcher.health()["status"] == "degraded"
+    dispatcher.close()
+    assert dispatcher.health()["status"] == "stopping"
+
+
+def test_workspace_queue_releases_only_after_real_process_teardown(dispatch_setup):
+    dispatcher, ledger, _ = dispatch_setup
+    dispatcher.workers.append({**dispatcher.workers[0], "rejected": {}})
+    ledger.ok(
+        "task_update",
+        task_id="t",
+        expected_revision=1,
+        title="Slow",
+        description="slow",
+        role_id="developer",
+    )
+    ledger.ok("task_create", task_id="next", title="Next", role_id="developer")
+    # t was created first; give it explicit priority to avoid timestamp ties.
+    task = ledger.ok("task_get", task_id="t")
+    ledger.ok(
+        "task_update",
+        task_id="t",
+        expected_revision=task["revision"],
+        title="Slow",
+        description="slow",
+        role_id="developer",
+        priority=3,
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        dispatcher.tick(pool)
+        deadline = time.monotonic() + 8
+        while ledger.ok("task_get", task_id="t")["status"] != "running":
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        dispatcher.tick(pool)
+        snapshot = dispatcher.capacity.snapshot()
+        assert snapshot["active_total"] == 1
+        assert snapshot["waiting"][0]["task_id"] == "next"
+        assert snapshot["waiting"][0]["reason"] == "workspace_busy"
+        assert ledger.ok("task_get", task_id="next")["fence"] == 0
+        control(ledger, "t", "cancel")
+        dispatcher.interrupt_task("default", "t").result(timeout=6)
+        assert dispatcher.capacity.snapshot()["active_total"] == 0
+        dispatcher.tick(pool)
+        for worker in dispatcher.workers:
+            if worker["future"]:
+                worker["future"].result(timeout=6)
+    assert ledger.ok("task_get", task_id="next")["status"] == "done"
+    assert dispatcher.capacity.snapshot()["active_total"] == 0
+
+
+def test_admission_releases_when_submit_or_worker_raises(dispatch_setup, monkeypatch):
+    dispatcher, _, _ = dispatch_setup
+    assert dispatcher.health()["status"] == "starting"
+
+    class BrokenPool:
+        def submit(self, *args):
+            raise RuntimeError("pool closed")
+
+    with pytest.raises(RuntimeError, match="pool closed"):
+        dispatcher.tick(BrokenPool())
+    assert dispatcher.capacity.snapshot()["active_total"] == 0
+    assert dispatcher.workers[0]["task"] is None
+
+    def broken(*args):
+        raise OSError("start failed")
+
+    monkeypatch.setattr(dispatcher, "_execute", broken)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        dispatcher.tick(pool)
+        with pytest.raises(OSError):
+            dispatcher.workers[0]["future"].result(timeout=3)
+    assert dispatcher.capacity.snapshot()["active_total"] == 0
+
+
+def test_two_dispatchers_share_capacity_and_yield_to_waiting_project(dispatch_setup, monkeypatch):
+    first, _, path = dispatch_setup
+    first.capacity = ExecutionCapacity(1)
+    second = Dispatcher(path, first.url, capacity=first.capacity)
+    second.workers[0]["cwd"] = path.parent / "other"
+    entered, release = threading.Event(), threading.Event()
+
+    async def candidate(worker, busy):
+        return (
+            None
+            if worker["future"]
+            else {"task_id": "task", "revision": 1, "priority": 1, "created_at": 0, "due_at": None}
+        )
+
+    def execute(*args):
+        entered.set()
+        assert release.wait(5)
+        return {"ok": True}
+
+    for dispatcher in (first, second):
+        monkeypatch.setattr(dispatcher, "_candidate", candidate)
+        monkeypatch.setattr(dispatcher, "_execute", execute)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first.tick(pool)
+            assert entered.wait(2)
+            second.tick(pool)
+            assert second.workers[0]["future"] is None
+            release.set()
+            first.workers[0]["future"].result(timeout=3)
+            first.tick(pool)
+            assert first.workers[0]["future"] is None
+            second.tick(pool)
+            assert second.workers[0]["future"] is not None
+            second.workers[0]["future"].result(timeout=3)
+    finally:
+        release.set()
+        second.close()
+
+
+def test_equal_task_ids_in_distinct_projects_are_not_deduplicated(dispatch_setup, monkeypatch):
+    dispatcher, _, path = dispatch_setup
+    first = dispatcher.workers[0]
+    second = {
+        **first,
+        "config": first["config"].model_copy(update={"project": "second"}),
+        "cwd": path.parent / "second",
+        "rejected": {},
+    }
+    dispatcher.workers.append(second)
+    release = threading.Event()
+
+    async def candidate(worker, busy):
+        return {
+            "task_id": "same-name",
+            "revision": 1,
+            "priority": 1,
+            "created_at": 0,
+            "due_at": None,
+        }
+
+    def execute(*args):
+        assert release.wait(3)
+        return {"ok": True}
+
+    monkeypatch.setattr(dispatcher, "_candidate", candidate)
+    monkeypatch.setattr(dispatcher, "_execute", execute)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        try:
+            dispatcher.tick(pool)
+            assert all(w["future"] is not None for w in dispatcher.workers)
+            assert dispatcher.capacity.snapshot()["active_total"] == 2
+        finally:
+            release.set()
+
+
+def test_dispatch_guard_rechecked_after_poll_and_cancelled_submission_frees_capacity(
+    dispatch_setup, monkeypatch
+):
+    from concurrent.futures import Future
+
+    dispatcher, _, _ = dispatch_setup
+    permitted = [True]
+    dispatcher.can_dispatch = lambda: permitted[0]
+    original = dispatcher._candidate
+
+    async def candidate(worker, busy):
+        task = await original(worker, busy)
+        permitted[0] = False
+        return task
+
+    monkeypatch.setattr(dispatcher, "_candidate", candidate)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        dispatcher.tick(pool)
+        assert not dispatcher.capacity.snapshot()["active"]
+        assert dispatcher.workers[0]["future"] is None
+        dispatcher.tick(pool)
+    permitted[0] = True
+    monkeypatch.setattr(dispatcher, "_candidate", original)
+
+    class QueuedPool:
+        def submit(self, *args):
+            return Future()
+
+    dispatcher.tick(QueuedPool())
+    assert dispatcher.capacity.snapshot()["active_total"] == 1
+    dispatcher.workers[0]["future"].cancel()
+    assert dispatcher.capacity.snapshot()["active_total"] == 0
+
+
+@pytest.mark.parametrize("change", ["missing-cwd", "bad-token", "invalid"])
 def test_dispatcher_rejects_bad_configuration(dispatch_setup, change):
     _, _, path = dispatch_setup
     config = json.loads(path.read_text())
-    if change == "duplicate":
-        config["workers"] *= 2
-    elif change == "missing-cwd":
+    if change == "missing-cwd":
         worker = path.parent / config["workers"][0]["config"]
         data = json.loads(worker.read_text())
         worker.write_text(json.dumps({**data, "cwd": "missing"}))
@@ -429,6 +725,29 @@ def test_entire_poll_deadline_cancels_slow_http_and_closes_cleanly(
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_transient_execution_failure_backs_off_instead_of_rejecting_forever(
+    dispatch_setup, monkeypatch
+):
+    dispatcher, _, _ = dispatch_setup
+    calls = []
+
+    def fail(*args, **kwargs):
+        calls.append(1)
+        raise ValueError("transient setup failure")
+
+    monkeypatch.setattr("relayfence.dispatcher.run_task", fail)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        dispatcher.tick(pool)
+        future = dispatcher.workers[0]["future"]
+        assert future is not None
+        future.result(timeout=5)
+        dispatcher.tick(pool)
+        assert dispatcher.workers[0]["rejected"]
+        dispatcher.tick(pool)
+        assert dispatcher.workers[0]["future"] is None
+        assert len(calls) == 1
 
 
 def test_health_write_failure_does_not_terminate_dispatch(dispatch_setup, monkeypatch):

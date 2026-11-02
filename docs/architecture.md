@@ -32,7 +32,7 @@ SQLite runs in WAL mode with foreign keys, a 10-second busy timeout and `synchro
 
 ## Ownership
 
-Each task has one status: `ready`, `running`, or `done`. A running task with an expired deadline can be claimed again. Expiration is evaluated on access; it does not require a sweeper or mutate task status by itself.
+Stored task statuses are `ready`, `running`, `done`, `paused`, `failed`, and `cancelled`. Read models also distinguish blocked dependencies, pending user decisions, pending reviews, and expired leases. A running task with an expired deadline can be claimed again explicitly. Expiration is evaluated on access; it does not require a sweeper or mutate task status by itself.
 
 ~~~mermaid
 stateDiagram-v2
@@ -71,9 +71,15 @@ Revisions are immutable. Freshness is computed when reading or claiming; there i
 
 Outputs cannot overwrite any direct or transitive input key. This also prevents the common self-invalidating dependency cycle. Multiple output writes are atomic; a conflict in one output rejects the entire completion.
 
-Artifact values are JSON metadata, text, or external references. The service does not fetch URLs, resolve Git SHAs, execute commands, evaluate model output, infer dependencies, or store binary files. The worker executes an operator-configured adapter (built-in Codex or a custom command). The optional local dispatcher may run alongside the server, but executable settings come only from private local files.
+Artifact values are JSON metadata, text, or external references. The service does not fetch URLs, resolve Git SHAs, execute commands, evaluate model output, infer dependencies, or store binary files. The worker executes an operator-configured adapter (built-in Codex, the OpenCode command adapter, or a custom command). The optional local dispatcher may run alongside the server, but executable settings come only from private local files.
 
-Task prerequisites form an acyclic graph. Claim captures prerequisite fence generations and incorporates their outputs into the artifact input snapshot. Reopening/re-executing a prerequisite invalidates the captured generation. The dispatcher polls ready work, sorts by priority/due date, bounds concurrency and uses OS-held workspace locks. It never automatically retries failed tasks or takes over expired running attempts.
+Task prerequisites form an acyclic graph. Claim captures prerequisite fence generations and incorporates their outputs into the artifact input snapshot. Reopening/re-executing a prerequisite invalidates the captured generation. The dispatcher polls ready work and sorts by priority/due date. All automatically connected project dispatchers share an `ExecutionCapacity` admission controller (default two active executions per service). A resolved working directory admits one execution at a time, matching the worker's filesystem lock. Different directories can execute concurrently. Queued projects receive a turn before a busy project starts more work; abandoned queue entries expire after 30 seconds. Task IDs are scoped by project when deduplicating candidates.
+
+Admission happens before thread-pool submission and is released after worker cleanup, including submission failure and cancellation. It is process-local scheduling, not an OS CPU/memory quota or a cross-host lock. The filesystem lock, Windows Job Object/POSIX process group, and ledger lease each retain their distinct responsibilities. Independent `dispatch` processes have their own capacity controllers; shared-directory exclusion still comes from the filesystem lock. Failed tasks and expired attempts require explicit recovery.
+
+Each provider identity is polled once per round even when multiple member slots share it. Project dispatchers use explicit pre-poll and admission hooks rather than replacing their `tick` methods; the manager's scheduling lock covers admission/stop transitions, not network polling. A slow provider in one project therefore does not hold the scheduling lock while other projects poll.
+
+`project_overview` assembles progress and recovery attention inside one ledger read transaction. Cancelled steps are excluded from the denominator; pending reviews and stale outputs are excluded from completed progress. The percentage covers all steps in the project, not overall business-goal acceptance. `/local/runtime` separately reports live scheduler health and capacity, which are observations rather than durable task state. Browser refreshes are coalesced with a trailing refresh so a mutation or project switch does not lose its update.
 
 ## Role/model snapshots and identity
 
@@ -94,3 +100,10 @@ v0.3 retains revisions, receipts and events indefinitely. Deleting receipts woul
 ## Why these limits exist
 
 The boundary keeps concurrency guarantees inspectable and adapters small. Instance identities reduce accidental cross-role access but do not create a hostile multi-tenant sandbox. Independent replicas need a shared transactional backend; external writes need an enforcement point. These require separate design work.
+
+
+## Per-run capabilities
+
+`mcp_catalogue.py` projects safe metadata from local Codex/OpenCode/ZCode/DSH configuration. Discovery never launches a configured executable or connects to an endpoint. Native definitions remain private; the ledger stores names only. Selected names are validated at save/dispatch and again at adapter execution so missing or unreadable configurations fail rather than silently changing the tool set. Plugin cache manifests are declared candidates only and cannot be selected as verified runtime connections.
+
+`Selection` and `OfficeMember` accept optional `mcp_servers`; the default preserves runtime configuration. `OfficeDispatch.member_overrides` applies Skill/MCP overrides to a deep-copied roster before creating tasks, leaving saved team configuration unchanged. Request hashing distinguishes omitted MCP overrides from explicit null. Registry acknowledgement strips default nulls to preserve legacy clients; nondefault selections participate in the immutable claim snapshot.

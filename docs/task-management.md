@@ -1,6 +1,6 @@
 # 任务管理与后台运行 / Task management and background execution
 
-v0.3 增加任务生命周期管理、持续调度和内置 Codex CLI 适配器。完成首次配置后，在控制台创建并分配任务，后台会自动领取满足条件的工作，不需要打开 Codex 桌面聊天窗口。
+v0.3 增加任务生命周期管理、持续调度和内置 Codex、OpenCode CLI 适配器。完成首次配置后，在控制台创建并分配任务，后台会自动领取满足条件的工作，不需要打开 Codex 桌面聊天窗口。
 
 ## 首次接入 Codex
 
@@ -38,7 +38,7 @@ uv run relayfence dispatch --config .relayfence/codex-worker/dispatcher.json
 
 ## 在控制台管理任务
 
-打开 `http://127.0.0.1:7433/`，使用本地 `.relayfence/access.token` 连接项目。点击 **New task**，填写标题、任务说明、优先级、截止时间，选择角色，按需填写输入键和前置任务 ID。前置任务必须已经存在。选择由 command 实例负责的角色后，在线调度器会自动领取就绪任务；外部 MCP 会话仍需在对应客户端中触发。
+打开 `serve` 在终端打印的一次性配对链接（10 分钟内有效），页面会将会话 Cookie 保存 8 小时。进入办公室后点击 **New task**，填写标题、任务说明、优先级、截止时间，选择角色，按需填写输入键和前置任务 ID。前置任务必须已经存在。选择由 command 实例负责的角色后，在线调度器会自动领取就绪任务；外部 MCP 会话仍需在对应客户端中触发。旧配置控制台仍可用状态目录中的管理员 `access.token` 打开 `/console`（新安装默认是系统应用数据目录；已有 `.relayfence` 时沿用其令牌）。
 
 | 显示状态  | 含义与可用操作                                                             |
 | --------- | -------------------------------------------------------------------------- |
@@ -89,15 +89,19 @@ Codex worker 示例：
 }
 ```
 
-路径相对于各自配置文件解析。调度器限制总体并发，同一个工作目录串行执行；文件锁也防止两个本机进程同时占用同一工作目录。需要并行改代码时，给不同实例配置独立 worktree。配置文件修改后重启调度器；角色和模型绑定的修改对后续领取生效。
+路径相对于各自配置文件解析。调度器限制总体并发，并允许同一工作目录中的多个成员并行执行；本机调度器配置会为同一供应商创建多个有界槽位，因此共享供应商的办公室成员也能同时启动。任务租约仍保证同一任务不会被领取两次。多个成员同时改同一批文件时，应给它们配置独立 worktree，避免覆盖。配置文件修改后重启调度器；角色和模型绑定的修改对后续领取生效。
 
 两个超时字段都是可选项，旧配置继续有效。调度器并发轮询各实例并复用连接，每个实例一轮查询默认最多 3 秒；连接故障独立退避，间隔最多 30 秒。worker 的续租请求使用独立异步连接，默认最多 5 秒，期间本地停止、执行超时和日志检查仍然运行。凭证文件替换后，下一次轮询会重建对应连接；已经开始的执行保留原凭证，原凭证被撤销时会停止。完整边界见[进程与通信机制](process-lifecycle.md)。
 
-DSH、ZCode 和其他软件继续支持外部 MCP 会话；也可按[命令适配器协议](roles-and-models.md#local-command-adapter-apply-the-selection-to-execution)配置后台运行。本版内置启动适配器仅包含 Codex，不能把它解释为已经完成所有厂商的后台接入。
+任务、事件、成员引导、办公室配置、本地项目索引和小组日志都写入项目 SQLite 账本。`group_logs_list` 以 `before` 游标从新到旧分页，可按小组、级别和关键词筛选，并返回按级别/事件类型/成员/小组统计、任务状态、平均完成耗时和最近告警。日志是事件账本和任务归属的只读投影，不会改变任务状态；写入日志时会剔除常见令牌、密码等敏感字段。
+
+DSH、ZCode 和其他软件继续支持外部 MCP 会话；也可按[命令适配器协议](roles-and-models.md#local-command-adapter-apply-the-selection-to-execution)配置后台运行。本版内置启动适配器包含 Codex 与 OpenCode，不能把它解释为已经完成所有厂商的后台接入。
 
 ## 结果、取消与恢复
 
 Codex 使用 `exec`、指定模型和结构化结果，详见[官方非交互运行文档](https://learn.chatgpt.com/docs/non-interactive-mode)。结构化结果包含 `outcome`、`summary`、`details`、`files` 和 `checks`。`blocked`/`failed` 会保存为失败任务；只有 `completed` 发布到 `tasks/<task_id>/result`。过长 ID 使用其 SHA-256 作为键中间部分。模型是否如实报告仍需外部验收，RelayFence 不判断代码语义正确性；命令行的模型参数也不作为供应商认证，实际模型证据保留为 unverified。
+
+OpenCode 使用 `run --standalone --format json`，把发现阶段得到的 `provider/model` 原样传给 `--model`。`read-only` 映射到 `plan` 代理，`workspace-write` 和 `danger-full-access` 映射到 `build`；适配器不添加绕过权限的参数，也不读取或改写 OpenCode 的认证配置。这里的映射是代理策略而非操作系统沙箱：`build` 仍遵循 OpenCode 自身权限规则（默认允许外部目录），需要强隔离时请使用独立 worktree 或容器。结果从 JSON 事件流的 assistant 文本中提取唯一结构化对象，同样要求 `outcome`、`summary`、`details`、`files` 和 `checks`。模型发现执行 `opencode models`；Windows 上还会查找 OpenCode Desktop 自带的 `opencode-cli.exe`（`%LOCALAPPDATA%\Programs\@opencodedesktop\resources` 或 `%APPDATA%\ai.opencode.desktop\cli`），不接受 `.cmd`/`.bat` 包装器。发现阶段会只读调用 `opencode api --standalone GET /api/model` 补充模型名称和价格；输入/输出及缓存价格全部为 0 的模型在办公室中标记为“免费”，其他模型显示基础价格，API 不可用时仅保留模型列表而不猜测价格。注册表对单个实例最多保存 64 个模型，因此每个供应商按 `opencode models` 的顺序保留前 64 个，避免 OpenRouter 等大型网关导致整个运行时发现失败。
 
 前置任务的所有产物自动加入后续任务的输入快照。前置任务重新打开或重新执行、共享输入版本变化，都会阻止持有旧快照的工作提交。API 中 `depends_on` 管任务顺序，`inputs` 管共享输入；不要靠标题推断依赖。
 

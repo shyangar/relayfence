@@ -11,15 +11,31 @@ from pathlib import Path
 
 @contextmanager
 def stop_on_signal(stop):
-    """Route service-manager termination through normal worker/dispatcher cleanup."""
+    """Route service-manager and Ctrl+C termination through normal cleanup."""
     if threading.current_thread() is not threading.main_thread():
         yield
         return
-    previous = signal.signal(signal.SIGTERM, lambda signum, frame: stop.set())
+
+    def request_stop(signum, frame):
+        stop.set()
+
+    signals = [signal.SIGTERM, signal.SIGINT]
+    if os.name == "nt" and hasattr(signal, "SIGBREAK"):
+        signals.append(signal.SIGBREAK)
+    previous = {}
     try:
+        for sig in signals:
+            try:
+                previous[sig] = signal.signal(sig, request_stop)
+            except (OSError, ValueError):
+                continue
         yield
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        for sig, handler in previous.items():
+            try:
+                signal.signal(sig, handler)
+            except (OSError, ValueError):
+                pass
 
 
 @contextmanager

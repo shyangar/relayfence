@@ -13,10 +13,22 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .client import AsyncRelayFenceClient, RelayFenceClient
 from .errors import CoordinationError
+from .execution_capacity import ExecutionCapacity
 from .locking import WorkspaceBusy, local_lock
 from .worker import load_config, replace_private, run_task, save_private
 
 logger = logging.getLogger(__name__)
+
+
+class _ExecutionStop:
+    """Observe runner shutdown and an individual task interruption together."""
+
+    def __init__(self, runner_stop, task_stop):
+        self.runner_stop = runner_stop
+        self.task_stop = task_stop
+
+    def is_set(self):
+        return self.runner_stop.is_set() or self.task_stop.is_set()
 
 
 class WorkerEntry(BaseModel):
@@ -35,8 +47,20 @@ class DispatcherConfig(BaseModel):
 
 
 class Dispatcher:
-    def __init__(self, path, url, stop=None):
+    def __init__(
+        self,
+        path,
+        url,
+        stop=None,
+        env_provider=None,
+        *,
+        capacity=None,
+        before_poll=None,
+        can_dispatch=None,
+        scheduling_lock=None,
+    ):
         self.path = Path(path).resolve()
+        self.env_provider = env_provider
         try:
             self.config = DispatcherConfig.model_validate_json(self.path.read_bytes())
         except ValueError as exc:
@@ -45,23 +69,25 @@ class Dispatcher:
         self.stop = stop or threading.Event()
         self.directory = (self.path.parent / self.config.run_directory).resolve()
         self.runner_id = "runner-" + uuid.uuid4().hex[:16]
+        self.capacity = capacity or ExecutionCapacity(self.config.max_parallel)
+        self.before_poll = before_poll
+        self.can_dispatch = can_dispatch or (lambda: True)
+        self._scheduling_lock = scheduling_lock or threading.Lock()
+        self._last_poll_at = None
+        self._last_poll_error = None
         self.workers = []
         self.worker_health = {}
         self._poll_loop = None
         self._poll_clients = {}
         self._retry_at = {}
         self._failures = {}
-        seen = set()
+        self._execution_lock = threading.Lock()
         for entry in self.config.workers:
             worker_path = (self.path.parent / entry.config).resolve()
             config = load_config(worker_path)
             cwd = (worker_path.parent / config.cwd).resolve()
             if not cwd.is_dir():
                 raise ValueError("Worker cwd must be an existing directory")
-            identity = (config.project, config.agent_id)
-            if identity in seen:
-                raise ValueError("Duplicate agent in dispatcher configuration")
-            seen.add(identity)
             token_file = (self.path.parent / entry.token_file).resolve()
             self._token(token_file)
             self.workers.append(
@@ -72,7 +98,11 @@ class Dispatcher:
                     "token_file": token_file,
                     "future": None,
                     "task": None,
-                    "rejected": set(),
+                    "task_stop": None,
+                    # (task_id, revision) -> (failures, retry_at). A transient
+                    # execution failure is retried with bounded backoff instead
+                    # of rejecting the task for the life of the dispatcher.
+                    "rejected": {},
                 }
             )
 
@@ -121,6 +151,7 @@ class Dispatcher:
     def close(self):
         """Stop probes before closing their clients; safe after run() or manual ticks."""
         self.stop.set()
+        self.capacity.withdraw(self.runner_id)
         if self._poll_loop is not None:
 
             async def close_clients():
@@ -149,10 +180,90 @@ class Dispatcher:
             if not after:
                 return result
 
-    def _execute(self, worker, task, directory):
+    def task_running(self, project, task_id):
+        """Whether a local execution still owns resources for this task."""
+        with self._execution_lock:
+            return any(
+                worker["config"].project == project
+                and worker["task"] is not None
+                and worker["task"]["task_id"] == task_id
+                and worker["future"] is not None
+                and not worker["future"].done()
+                for worker in self.workers
+            )
+
+    def interrupt_task(self, project, task_id):
+        """Signal one execution and return its teardown future, if present.
+
+        The caller must fence/pause the ledger task before signalling, then wait
+        for this future before resuming. Completion means the worker has killed
+        its process tree and released its local locks. Other tasks continue.
+        """
+        with self._execution_lock:
+            for worker in self.workers:
+                if (
+                    worker["config"].project == project
+                    and worker["task"] is not None
+                    and worker["task"]["task_id"] == task_id
+                    and worker["future"] is not None
+                ):
+                    worker["task_stop"].set()
+                    return worker["future"]
+        return None
+
+    def _execute_reserved(self, worker, task, directory, task_stop, ticket):
         try:
+            return self._execute(worker, task, directory, task_stop)
+        finally:
+            self.capacity.release(ticket)
+
+    def health(self):
+        """A sanitized live observation; thread existence alone is not readiness."""
+        with self._execution_lock:
+            age = (
+                None
+                if self._last_poll_at is None
+                else max(0, time.monotonic() - self._last_poll_at)
+            )
+            workers = {key: dict(value) for key, value in self.worker_health.items()}
+            status = (
+                "stopping"
+                if self.stop.is_set()
+                else "degraded"
+                if self._last_poll_error
+                else "starting"
+                if age is None
+                else "stale"
+                if age > max(15, self.config.request_timeout_seconds * 2 + self.config.poll_seconds)
+                else "degraded"
+                if any(not value["ok"] for value in workers.values())
+                else "healthy"
+            )
+            return {
+                "status": status,
+                "last_poll_age_seconds": age,
+                "error_code": self._last_poll_error,
+                "workers": workers,
+            }
+
+    def _execute(self, worker, task, directory, task_stop):
+        try:
+            extra_env = (
+                self.env_provider(worker["config"]) if self.env_provider is not None else None
+            )
             with self._client(worker) as client:
-                run_task(client, worker["path"], task["task_id"], directory, self.stop)
+                run_task(
+                    client,
+                    worker["path"],
+                    task["task_id"],
+                    directory,
+                    _ExecutionStop(self.stop, task_stop),
+                    env=extra_env,
+                    # Use the configuration validated at dispatcher startup. A
+                    # process that can write the state directory must not be able
+                    # to swap the executable between tasks.
+                    config=worker["config"],
+                )
             outcome = {"ok": True, "task_id": task["task_id"]}
         except WorkspaceBusy:
             return {"ok": False, "task_id": task["task_id"], "code": "workspace_busy"}
@@ -175,21 +286,48 @@ class Dispatcher:
                     outcome = future.result()
                 except Exception as exc:
                     outcome = {"ok": False, "code": type(exc).__name__}
-                if not outcome["ok"] and outcome["code"] in {
-                    "ValueError",
-                    "RuntimeError",
-                    "OSError",
-                    "FileNotFoundError",
-                }:
-                    worker["rejected"].add((worker["task"]["task_id"], worker["task"]["revision"]))
-                worker["future"], worker["task"] = None, None
+                task = worker["task"]
+                if task is not None:
+                    key = (task["task_id"], task["revision"])
+                    if outcome["ok"]:
+                        worker["rejected"].pop(key, None)
+                    elif outcome["code"] in {
+                        "ValueError",
+                        "RuntimeError",
+                        "OSError",
+                        "FileNotFoundError",
+                    }:
+                        failures, _ = worker["rejected"].get(key, (0, 0))
+                        failures = min(failures + 1, 8)
+                        delay = min(
+                            300.0,
+                            max(2.0, self.config.poll_seconds * 2 ** (failures - 1)),
+                        )
+                        worker["rejected"][key] = (failures, time.monotonic() + delay)
+                        if len(worker["rejected"]) > 256:
+                            for old in list(worker["rejected"])[:-256]:
+                                worker["rejected"].pop(old, None)
+                with self._execution_lock:
+                    worker["future"], worker["task"], worker["task_stop"] = None, None, None
         busy = [w for w in self.workers if w["future"] is not None]
+        claimed = {
+            (w["config"].project, w["task"]["task_id"])
+            for w in self.workers
+            if w["task"] is not None and w["future"] is not None
+        }
         if self.stop.is_set():
+            self.capacity.withdraw(self.runner_id)
             return
+        if not self.can_dispatch():
+            self.capacity.withdraw(self.runner_id)
+            return
+        if self.before_poll is not None:
+            self.before_poll()
         if self._poll_loop is None:
             self._poll_loop = asyncio.Runner()
         # Poll identities concurrently, but select from the whole round to preserve
-        # global priority (particularly for roles sharing a workspace).
+        # global priority. Multiple slots for the same provider must not claim the
+        # same task; ``claimed`` also covers tasks selected earlier in this round.
         probes = self._poll_loop.run(self._poll_round(busy))
         candidates = []
         for worker, probe in probes:
@@ -198,7 +336,8 @@ class Dispatcher:
                 if isinstance(probe, Exception):
                     raise probe
                 task = probe
-                self.worker_health[identity] = {"ok": True}
+                with self._execution_lock:
+                    self.worker_health[identity] = {"ok": True}
                 self._failures.pop(identity, None)
                 self._retry_at.pop(identity, None)
                 if task:
@@ -208,19 +347,60 @@ class Dispatcher:
                 self._failures[identity] = failures
                 delay = min(30, self.config.poll_seconds * 2 ** (failures - 1))
                 self._retry_at[identity] = time.monotonic() + delay
-                self.worker_health[identity] = {
-                    "ok": False,
-                    "code": exc.code if isinstance(exc, CoordinationError) else type(exc).__name__,
-                    "retry_after_seconds": delay,
-                }
+                with self._execution_lock:
+                    self.worker_health[identity] = {
+                        "ok": False,
+                        "code": exc.code
+                        if isinstance(exc, CoordinationError)
+                        else type(exc).__name__,
+                        "retry_after_seconds": delay,
+                    }
+        with self._execution_lock:
+            self._last_poll_at = time.monotonic()
+            self._last_poll_error = None
+        if not candidates:
+            self.capacity.withdraw(self.runner_id)
         for task, worker in sorted(candidates, key=lambda pair: self._priority(pair[0])):
             if self.stop.is_set() or len(busy) >= self.config.max_parallel:
                 break
-            if any(w["cwd"] == worker["cwd"] for w in busy):
+            task_key = (worker["config"].project, task["task_id"])
+            if task_key in claimed:
                 continue
             directory = self.directory / ("run-" + uuid.uuid4().hex)
-            worker["task"] = task
-            worker["future"] = pool.submit(self._execute, worker, task, directory)
+            with self._scheduling_lock:
+                if self.stop.is_set() or not self.can_dispatch():
+                    self.capacity.withdraw(self.runner_id)
+                    break
+                ticket = self.capacity.reserve(
+                    self.runner_id, worker["config"].project, task["task_id"], worker["cwd"]
+                )
+                if ticket is None:
+                    # All local slots for this project use the same checkout.
+                    # Keep the highest-priority candidate at the head of its queue.
+                    break
+                try:
+                    with self._execution_lock:
+                        worker["task"] = task
+                        worker["task_stop"] = threading.Event()
+                        worker["future"] = pool.submit(
+                            self._execute_reserved,
+                            worker,
+                            task,
+                            directory,
+                            worker["task_stop"],
+                            ticket,
+                        )
+                        worker["future"].add_done_callback(
+                            lambda future, reserved=ticket: (
+                                self.capacity.release(reserved) if future.cancelled() else None
+                            )
+                        )
+                except BaseException:
+                    self.capacity.release(ticket)
+                    with self._execution_lock:
+                        worker["task"], worker["task_stop"] = None, None
+                    raise
+            claimed.add(task_key)
             busy.append(worker)
 
     async def _poll_round(self, busy):
@@ -235,10 +415,17 @@ class Dispatcher:
             except (CoordinationError, OSError, ValueError) as exc:
                 return worker, exc
 
+        # Provider slots share a client; concurrent probes on that client would
+        # race initialization/rotation and multiply identical ledger requests.
+        representatives = {}
+        for worker in self.workers:
+            identity = self._identity(worker)
+            if identity not in representatives or representatives[identity]["future"] is not None:
+                representatives[identity] = worker
         return await asyncio.gather(
             *(
                 probe(worker)
-                for worker in self.workers
+                for worker in representatives.values()
                 if time.monotonic() >= self._retry_at.get(self._identity(worker), 0)
             )
         )
@@ -248,18 +435,33 @@ class Dispatcher:
         async with self._poll_client(worker) as client:
             if self.stop.is_set():
                 return None
+            active_task = next(
+                (
+                    slot["task"]["task_id"]
+                    for slot in self.workers
+                    if self._identity(slot) == self._identity(worker)
+                    and slot["task"] is not None
+                    and slot["future"] is not None
+                ),
+                None,
+            )
             await client.call(
                 "runner_heartbeat",
                 project=config.project,
                 actor=config.agent_id,
                 request_id=uuid.uuid4().hex,
                 runner_id=self.runner_id,
-                active_task=worker["task"]["task_id"] if worker["task"] else None,
+                active_task=active_task,
             )
             if self.stop.is_set() or worker["future"] or len(busy) >= self.config.max_parallel:
                 return None
-            if any(w["cwd"] == worker["cwd"] for w in busy):
-                return None
+            active = {
+                slot["task"]["task_id"]
+                for slot in self.workers
+                if slot["config"].project == config.project
+                and slot["task"] is not None
+                and slot["future"] is not None
+            }
             roles = await self._list(client, "roles_list", "roles", config.project)
             assigned = {role["role_id"] for role in roles if role["agent_id"] == config.agent_id}
             tasks = await self._list(client, "tasks_list", "tasks", config.project, status="ready")
@@ -267,9 +469,15 @@ class Dispatcher:
                 task
                 for task in tasks
                 if task["role_id"] in assigned
-                and (task["task_id"], task["revision"]) not in worker["rejected"]
+                and task["task_id"] not in active
+                and not self._rejected(worker, task)
             ]
             return min(tasks, key=self._priority) if tasks else None
+
+    @staticmethod
+    def _rejected(worker, task):
+        entry = worker["rejected"].get((task["task_id"], task["revision"]))
+        return bool(entry and time.monotonic() < entry[1])
 
     @staticmethod
     def _priority(task):
@@ -300,6 +508,8 @@ class Dispatcher:
                                 if isinstance(exc, CoordinationError)
                                 else type(exc).__name__,
                             }
+                            with self._execution_lock:
+                                self._last_poll_error = health["code"]
                         try:
                             replace_private(self.directory / "health.json", health)
                         except OSError:

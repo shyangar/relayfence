@@ -13,6 +13,45 @@ from relayfence.codex_adapter import (
 from relayfence.worker import WorkerConfig, adapter_command
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_adapter_json_survives_legacy_windows_stdout(tmp_path, monkeypatch, failed):
+    import io
+
+    raw = io.BytesIO()
+    output = io.TextIOWrapper(raw, encoding="cp936")
+    monkeypatch.setattr("sys.stdout", output)
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(b"{}")))
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "adapter",
+            "--executable",
+            "codex",
+            "--sandbox",
+            "danger-full-access",
+            "--model",
+            "a",
+            "--parameters",
+            "{}",
+        ],
+    )
+    monkeypatch.setenv("RELAYFENCE_RUN_DIRECTORY", str(tmp_path))
+    text = "完成 — 中文与 emoji 🧪"
+
+    def execute_result(*args):
+        if failed:
+            raise AgentIncomplete("failed", text)
+        return {"outputs": [{"key": "result", "expected_version": 0, "value": text}]}
+
+    monkeypatch.setattr("relayfence.codex_adapter.execute", execute_result)
+    assert main() == 0
+    output.flush()
+    wire = raw.getvalue()
+    assert wire.isascii()
+    data = json.loads(wire.decode("utf-8"))
+    assert (data["error"]["message"] if failed else data["outputs"][0]["value"]) == text
+
+
 def test_codex_command_preserves_selection_paths_and_structured_result(tmp_path, monkeypatch):
     selection = {"model": "test-model", "parameters": {"reasoning_effort": "high"}}
     envelope = {
@@ -25,7 +64,8 @@ def test_codex_command_preserves_selection_paths_and_structured_result(tmp_path,
         assert command[0] == "C:/Agent software/codex.exe"
         assert command[command.index("--model") + 1] == "test-model"
         assert 'model_reasoning_effort="high"' in command
-        assert "--ignore-user-config" in command and "--output-schema" in command
+        # `--ignore-user-config` also disables skill discovery, so it must be absent.
+        assert "--ignore-user-config" not in command and "--output-schema" in command
         assert json.loads(kwargs["input"].decode().split("\n", 1)[1]) == envelope
         schema = json.loads((tmp_path / "codex-schema.json").read_text())
         assert schema["additionalProperties"] is False
