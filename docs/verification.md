@@ -2,6 +2,11 @@
 
 Initial verification date: 2026-10-10. This file records actual checks and their scope, not a reliability SLA.
 
+## macOS fast-exit cleanup regression (2026-11-03)
+
+- Main commit 9fd35f1 passed Ubuntu, Windows and wheel checks but exposed an intermittent macOS `EPERM` while cleaning up a fast-exiting adapter. That cleanup error masked the expected output-size rejection. The earlier PR run did not trigger this timing window.
+- Group cleanup now uses a bounded macOS retry, polling/reaping on every attempt and continuing to signal descendants after leader exit. Deterministic cases cover a leader still reported alive, a group disappearing, a surviving group becoming signalable, persistent permission failures and unchanged Linux error handling. The real subprocess output-limit tests run five times per output type on every platform to exercise the fast-exit path repeatedly. No output limit, permission check or coverage threshold is relaxed.
+
 ## Cross-platform CI correction (2026-11-02)
 
 - Commit 270a71e passed all functional tests on Ubuntu (730 passed, 5 platform skips), but failed the 90% coverage gate because Windows-only modules were counted as unexecuted there. The Windows matrix job and Linux wheel smoke test succeeded. macOS additionally exposed a test assertion that confused its temporary path's `private` component with the file-content marker.

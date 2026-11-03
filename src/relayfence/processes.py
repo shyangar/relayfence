@@ -5,6 +5,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -36,6 +37,24 @@ def stop_on_signal(stop):
                 signal.signal(sig, handler)
             except (OSError, ValueError):
                 pass
+
+
+def _kill_process_group(process):
+    # Darwin may report EPERM while a fast-exiting leader is still tearing down,
+    # including after poll() briefly reports it alive. Reap on every retry, then
+    # still signal the group so descendants cannot outlive an exited leader.
+    deadline = time.monotonic() + 0.5
+    while True:
+        process.poll()
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            return
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            if sys.platform != "darwin" or time.monotonic() >= deadline:
+                raise  # A persistent permission failure is not successful cleanup.
+            time.sleep(0.01)
 
 
 @contextmanager
@@ -92,23 +111,7 @@ def managed_process(command, *, input_path, cwd, env, stdout, stderr):
             if job is not None:
                 job.close()
             elif process is not None:
-                # The leader may already have exited while descendants are alive.
-                # Reap it first: macOS can report EPERM for a group whose only
-                # remaining member is an unreaped zombie. Still signal the group
-                # after poll(), because live descendants can outlast that leader.
-                process.poll()
-                try:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except PermissionError:
-                        # Cover the leader exiting between poll() and killpg().
-                        # Preserve genuine permission failures, including those
-                        # from a surviving child with different credentials.
-                        if process.poll() is None:
-                            raise
-                        os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                _kill_process_group(process)
         finally:
             if process is not None:
                 if process.poll() is None:

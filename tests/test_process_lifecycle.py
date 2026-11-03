@@ -11,6 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from test_worker import command_task  # noqa: F401
@@ -24,6 +25,61 @@ from relayfence.worker import execute_command
 
 RESULT = {"outputs": [{"key": "result", "expected_version": 0, "value": "ok"}]}
 PYTHON = str(Path(sys.base_prefix) / "python.exe") if os.name == "nt" else sys.executable
+
+
+@pytest.mark.parametrize("last_result", [None, ProcessLookupError()])
+def test_darwin_teardown_retries_eperm_even_before_leader_exit(monkeypatch, last_result):
+    from relayfence import processes
+
+    polls = iter([None, None, 0])
+    calls = []
+    process = SimpleNamespace(pid=12345, poll=lambda: next(polls))
+    results = iter([PermissionError(), PermissionError(), last_result])
+
+    def killpg(pid, sig):
+        calls.append((pid, sig))
+        result = next(results)
+        if result is not None:
+            raise result
+
+    monkeypatch.setattr(processes, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(processes, "signal", SimpleNamespace(SIGKILL=9))
+    monkeypatch.setattr(processes.os, "killpg", killpg, raising=False)
+    monkeypatch.setattr(
+        processes, "time", SimpleNamespace(monotonic=lambda: 0, sleep=lambda _: None)
+    )
+    with pytest.raises(RuntimeError, match="original output limit"):
+        try:
+            raise RuntimeError("original output limit")
+        finally:
+            processes._kill_process_group(process)
+    assert calls == [(12345, 9)] * 3
+
+
+@pytest.mark.parametrize(
+    "platform,polls", [("darwin", [None, 0]), ("darwin", [0, 0]), ("linux", [0])]
+)
+def test_group_cleanup_preserves_real_permission_failures(monkeypatch, platform, polls):
+    from relayfence import processes
+
+    states = iter(polls)
+    clock = iter([0, 0.1, 0.6])
+    calls = []
+    process = SimpleNamespace(pid=12345, poll=lambda: next(states))
+
+    def killpg(pid, sig):
+        calls.append(pid)
+        raise PermissionError("genuine permission failure")
+
+    monkeypatch.setattr(processes, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(processes, "signal", SimpleNamespace(SIGKILL=9))
+    monkeypatch.setattr(processes.os, "killpg", killpg, raising=False)
+    monkeypatch.setattr(
+        processes, "time", SimpleNamespace(monotonic=lambda: next(clock), sleep=lambda _: None)
+    )
+    with pytest.raises(PermissionError, match="genuine permission failure"):
+        processes._kill_process_group(process)
+    assert len(calls) == len(polls)
 
 
 def alive(pid):
@@ -295,7 +351,8 @@ def test_unresponsive_http_does_not_block_process_monitor(process_tree, cause):
         ("opencode-events", 8_388_609),
     ],
 )
-def test_final_output_limits_are_checked_after_fast_exit(tmp_path, stream, size):
+@pytest.mark.parametrize("attempt", range(5))
+def test_final_output_limits_are_checked_after_fast_exit(tmp_path, stream, size, attempt):
     async def heartbeat():
         pass
 
